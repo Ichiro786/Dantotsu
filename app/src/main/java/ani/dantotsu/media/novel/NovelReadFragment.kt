@@ -116,10 +116,11 @@ class NovelReadFragment : Fragment(),
                     lnReaderParser = parser
                 )
                 NovelServiceDataSingleton.downloadQueue.offer(downloadTask)
+                val appContext = it.applicationContext
                 CoroutineScope(Dispatchers.IO).launch {
-                    val intent = Intent(context, NovelDownloaderService::class.java)
+                    val intent = Intent(appContext, NovelDownloaderService::class.java)
                     withContext(Dispatchers.Main) {
-                        ContextCompat.startForegroundService(requireContext(), intent)
+                        ContextCompat.startForegroundService(appContext, intent)
                     }
                     NovelServiceDataSingleton.isServiceRunning = true
                 }
@@ -466,7 +467,7 @@ class NovelReadFragment : Fragment(),
                 requireContext(),
                 downloadStatusReceiver,
                 intentFilter,
-                ContextCompat.RECEIVER_EXPORTED
+                ContextCompat.RECEIVER_NOT_EXPORTED
             )
             isReceiverRegistered = true
         }

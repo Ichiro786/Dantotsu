@@ -32,7 +32,7 @@ class AutoBackupWorker(appContext: Context, workerParams: WorkerParameters) :
         }
 
         return try {
-            val exportableLocations = Location.entries.filter { it.exportable }
+            val exportableLocations = Location.entries.filter { it.exportable && it != Location.Protected } // unencrypted file: never include tokens/app password
             val serialized = PrefManager.exportAllPrefs(exportableLocations)
 
             val backupDir = File(

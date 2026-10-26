@@ -50,7 +50,10 @@ class Login : AppCompatActivity() {
             settings.databaseEnabled = true
             settings.domStorageEnabled = true
         }
-        WebView.setWebContentsDebuggingEnabled(true)
+        // remote WebView inspection only in debuggable builds
+        WebView.setWebContentsDebuggingEnabled(
+            (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        )
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)

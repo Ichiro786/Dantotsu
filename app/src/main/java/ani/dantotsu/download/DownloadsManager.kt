@@ -32,17 +32,31 @@ import kotlin.math.pow
 @SingleIn(AppScope::class)
 class DownloadsManager(private val context: Context) {
     private val gson = Gson()
-    private val downloadsList = loadDownloads().toMutableList()
+
+    // The index is shared by the download services (IO threads) and the UI, so every access
+    // goes through synchronized(downloadsList). It is loaded on first use instead of at
+    // app start (App warms it up on an IO thread).
+    private val downloadsList: MutableList<DownloadedType> by lazy {
+        loadDownloads().toMutableList()
+    }
+
+    private inline fun <T> withIndex(block: (MutableList<DownloadedType>) -> T): T =
+        synchronized(downloadsList) { block(downloadsList) }
+
+    /** Loads the index if it isn't loaded yet; meant to be called from a background thread. */
+    fun warmUp() {
+        withIndex { it.size }
+    }
 
     val mangaDownloadedTypes: List<DownloadedType>
-        get() = downloadsList.filter { it.type == MediaType.MANGA }
+        get() = withIndex { list -> list.filter { it.type == MediaType.MANGA } }
     val animeDownloadedTypes: List<DownloadedType>
-        get() = downloadsList.filter { it.type == MediaType.ANIME }
+        get() = withIndex { list -> list.filter { it.type == MediaType.ANIME } }
     val novelDownloadedTypes: List<DownloadedType>
-        get() = downloadsList.filter { it.type == MediaType.NOVEL }
+        get() = withIndex { list -> list.filter { it.type == MediaType.NOVEL } }
 
     private fun saveDownloads() {
-        val jsonString = gson.toJson(downloadsList)
+        val jsonString = withIndex { gson.toJson(it) }
         PrefManager.setVal(PrefName.DownloadsKeys, jsonString)
     }
 
@@ -82,13 +96,14 @@ class DownloadsManager(private val context: Context) {
                     // Skip empty shells left behind by a cancelled download.
                     if (chapterDir.listFiles().none { it.isFile && it.length() > 0 }) continue
 
-                    val alreadyIndexed = downloadsList.any {
-                        it.type == type && it.titleName == title && it.chapterName == chapter
+                    val newlyAdded = withIndex { list ->
+                        val alreadyIndexed = list.any {
+                            it.type == type && it.titleName == title && it.chapterName == chapter
+                        }
+                        if (!alreadyIndexed) list.add(DownloadedType(title, chapter, type))
+                        !alreadyIndexed
                     }
-                    if (!alreadyIndexed) {
-                        downloadsList.add(DownloadedType(title, chapter, type))
-                        added++
-                    }
+                    if (newlyAdded) added++
                 }
             }
         }
@@ -100,7 +115,7 @@ class DownloadsManager(private val context: Context) {
     }
 
     fun addDownload(downloadedType: DownloadedType) {
-        downloadsList.add(downloadedType)
+        withIndex { it.add(downloadedType) }
         saveDownloads()
     }
 
@@ -110,7 +125,9 @@ class DownloadsManager(private val context: Context) {
         onFinished: () -> Unit
     ) {
         removeDownloadCompat(context, downloadedType, toast)
-        downloadsList.removeAll { it.titleName == downloadedType.titleName && it.chapterName == downloadedType.chapterName }
+        withIndex { list ->
+            list.removeAll { it.matches(downloadedType) }
+        }
         CoroutineScope(Dispatchers.IO).launch {
             removeDirectory(downloadedType, toast)
             withContext(Dispatchers.Main) {
@@ -121,18 +138,21 @@ class DownloadsManager(private val context: Context) {
     }
 
     fun getSize(downloadedType: DownloadedType): Double {
-        val index = downloadsList.indexOfFirst { it.titleName == downloadedType.titleName && it.chapterName == downloadedType.chapterName }
-        if (index == -1) return 0.0
+        val exists = withIndex { list -> list.any { it.matches(downloadedType) } }
+        if (!exists) return 0.0
         if(downloadedType.size == null) {
+            // getDirSize never creates folders and uses the download's own media type
             val episodeSize = bytesToDouble(
                 getDirSize(
                     context,
-                    MediaType.ANIME,
+                    downloadedType.type,
                     downloadedType.titleName,
                     downloadedType.chapterName
                 )
             )
-            downloadsList[index].size = episodeSize
+            withIndex { list ->
+                list.firstOrNull { it.matches(downloadedType) }?.size = episodeSize
+            }
             saveDownloads()
             return episodeSize
         }
@@ -155,19 +175,7 @@ class DownloadsManager(private val context: Context) {
             snackString("Directory does not exist")
             cleanDownloads()
         }
-        when (type) {
-            MediaType.MANGA -> {
-                downloadsList.removeAll { it.titleName == title && it.type == MediaType.MANGA }
-            }
-
-            MediaType.ANIME -> {
-                downloadsList.removeAll { it.titleName == title && it.type == MediaType.ANIME }
-            }
-
-            MediaType.NOVEL -> {
-                downloadsList.removeAll { it.titleName == title && it.type == MediaType.NOVEL }
-            }
-        }
+        withIndex { list -> list.removeAll { it.titleName == title && it.type == type } }
         saveDownloads()
     }
 
@@ -203,13 +211,14 @@ class DownloadsManager(private val context: Context) {
             }
         }
         //now remove all downloads that do not have a folder
-        val iterator = downloadsList.iterator()
-        while (iterator.hasNext()) {
-            val download = iterator.next()
-            val downloadDir = directory?.findFolder(download.titleName)
-            if ((downloadDir?.exists() == false && download.type == type) || download.titleName.isBlank()) {
-                iterator.remove()
-            }
+        val snapshot = withIndex { it.toList() }
+        val missing = snapshot.filter { download ->
+            // read-only lookup: a loose match is fine here, it only keeps index entries
+            val downloadDir = directory?.findFolder(download.titleName, fuzzy = true)
+            (downloadDir?.exists() == false && download.type == type) || download.titleName.isBlank()
+        }
+        if (missing.isNotEmpty()) {
+            withIndex { list -> list.removeAll { d -> missing.any { it === d } } }
         }
     }
 
@@ -270,16 +279,16 @@ class DownloadsManager(private val context: Context) {
         }
     }
 
-    fun queryDownload(downloadedType: DownloadedType): Boolean {
-        return downloadsList.any {
+    fun queryDownload(downloadedType: DownloadedType): Boolean = withIndex { downloadsList ->
+        downloadsList.any {
             it.type == downloadedType.type &&
                     it.titleName.equals(downloadedType.titleName, ignoreCase = true) &&
                     it.chapterName.equals(downloadedType.chapterName, ignoreCase = true)
         }
     }
 
-    fun queryDownload(title: String, chapter: String, type: MediaType? = null): Boolean {
-        return if (type == null) {
+    fun queryDownload(title: String, chapter: String, type: MediaType? = null): Boolean = withIndex { downloadsList ->
+        if (type == null) {
             downloadsList.any { it.titleName.equals(title, ignoreCase = true) && it.chapterName.equals(chapter, ignoreCase = true) }
         } else {
             downloadsList.any { it.titleName.equals(title, ignoreCase = true) && it.chapterName.equals(chapter, ignoreCase = true) && it.type == type }
@@ -291,7 +300,7 @@ class DownloadsManager(private val context: Context) {
         val directory =
             baseDirectory?.findFolder(downloadedType.titleName)
                 ?.findFolder(downloadedType.chapterName)
-        downloadsList.removeAll { it.titleName == downloadedType.titleName && it.chapterName == downloadedType.chapterName }
+        withIndex { list -> list.removeAll { it.matches(downloadedType) } }
         // Check if the directory exists and delete it recursively
         if (directory?.exists() == true) {
             val deleted = directory.delete()
@@ -318,7 +327,7 @@ class DownloadsManager(private val context: Context) {
             snackString("Directory does not exist")
         }
 
-        downloadsList.removeAll { it.type == type }
+        withIndex { list -> list.removeAll { it.type == type } }
         saveDownloads()
     }
 
@@ -391,10 +400,10 @@ class DownloadsManager(private val context: Context) {
             title: String,
             chapter: String? = null
         ): DocumentFile? {
-            val folder = getBaseDirectory(context, type)?.findFolder(title.findValidName())
+            val folder = getBaseDirectory(context, type)?.findFolder(title.findValidName(), fuzzy = true)
                 ?: return null
             val safeChapter = chapter?.findValidName()
-            return if (safeChapter.isNullOrEmpty()) folder else folder.findFolder(safeChapter)
+            return if (safeChapter.isNullOrEmpty()) folder else folder.findFolder(safeChapter, fuzzy = true)
         }
 
         fun getDirSize(
@@ -403,7 +412,8 @@ class DownloadsManager(private val context: Context) {
             title: String,
             chapter: String? = null
         ): Long {
-            val directory = getSubDirectory(context, type, false, title, chapter) ?: return 0
+            // read-only: never create missing folders just to measure them
+            val directory = findSubDirectory(context, type, title, chapter) ?: return 0
             var size = 0L
             directory.listFiles().forEach {
                 size += it.length()
@@ -443,13 +453,20 @@ class DownloadsManager(private val context: Context) {
             }
         }
 
-        private fun DocumentFile.findFolder(name: String): DocumentFile? {
+        /**
+         * Finds a sub folder by (normalised, case-insensitive) exact name.
+         * [fuzzy] enables the loose "(n)"-suffix / fuzzy-ratio fallback; it must only be used
+         * for read-only lookups: on create/write/delete paths a loose match puts downloads
+         * into (and deletes) another season's or chapter's folder.
+         */
+        private fun DocumentFile.findFolder(name: String, fuzzy: Boolean = false): DocumentFile? {
             val validName = name.findValidName()
             val direct = findFile(validName)
             if (direct != null && direct.isDirectory) return direct
             val list = listFiles()
             val exact = list.find { it.isDirectory && it.name?.findValidName().equals(validName, ignoreCase = true) }
             if (exact != null) return exact
+            if (!fuzzy) return null
 
             val baseNameWithoutSuffix = validName.replace(Regex("\\s*\\(\\d+\\)$"), "")
             val withoutSuffixMatch = list.find {
@@ -515,6 +532,9 @@ data class DownloadedType(
     val uniqueName: String
         get() = "$chapterName-${scanlator}"
 }
+
+private fun DownloadedType.matches(other: DownloadedType): Boolean =
+    type == other.type && titleName == other.titleName && chapterName == other.chapterName
 
 private fun bytesToDouble(bytes: Long): Double {
     if (bytes <= 0) return 0.0

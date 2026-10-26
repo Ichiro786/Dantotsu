@@ -122,7 +122,9 @@ import ani.dantotsu.util.Logger
 import ani.dantotsu.util.customAlertDialog
 import com.bumptech.glide.Glide
 import com.google.android.material.slider.Slider
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -220,6 +222,12 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
     private var playerErrorRetryCount = 0
     private var rotation = 0
     private var wasPlaying = false
+    // Whether playback should resume when the activity comes back to the foreground
+    private var resumeOnForeground = true
+    private var pausedInPip = false
+    // Instance copy of the static media so a new instance (singleTask relaunch) can't make
+    // this one save its position/progress under another show.
+    private var playerMedia: Media? = null
 
     private val handler = Handler(Looper.getMainLooper())
     val model: MediaDetailsViewModel by viewModels()
@@ -291,6 +299,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         const val ACTION_PIP_PLAY_PAUSE = "ani.dantotsu.PIP_PLAY_PAUSE"
         const val ACTION_PIP_SKIP = "ani.dantotsu.PIP_SKIP"
         const val ACTION_PIP_NEXT_EP = "ani.dantotsu.PIP_NEXT_EP"
+        private val playerCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 
     override fun onAttachedToWindow() {
@@ -317,6 +326,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
             finish()
             return
         }
+        playerMedia = media
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode =
@@ -1897,17 +1907,27 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         orientationListener?.enable()
         hideSystemBarsExtendView()
         playerView.onResume()
-        playerView.useController = true
-        if (playerManager.isInitialized) {
+        playerView.useController = !(Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode)
+        // Coming back from PiP: the player state already reflects what the user chose there.
+        if (playerManager.isInitialized && resumeOnForeground && !pausedInPip) {
             playerManager.exoPlayer?.play()
         }
+        pausedInPip = false
     }
 
     override fun onPause() {
         super.onPause()
         orientationListener?.disable()
+        // Entering PiP also calls onPause: keep playing and tracking in that case.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode) {
+            pausedInPip = true
+            return
+        }
         if (playerManager.isInitialized) {
-            playerManager.exoPlayer?.pause()
+            playerManager.exoPlayer?.let { p ->
+                resumeOnForeground = p.playWhenReady
+                p.pause()
+            }
         }
         playerView.onPause()
         aniSkipManager.stopTracking()
@@ -1916,8 +1936,15 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
 
     override fun onStop() {
         super.onStop()
+        val media = playerMedia ?: return
         if (playerManager.isInitialized) {
+            pausedInPip = false
             playerManager.exoPlayer?.let { p ->
+                if (p.playWhenReady) {
+                    // Closed from PiP / sent to background while playing
+                    resumeOnForeground = true
+                    p.pause()
+                }
                 val selEp = media.anime?.selectedEpisode
                 if (selEp != null) {
                     PrefManager.setCustomVal("${media.id}_${selEp}", p.currentPosition)
@@ -1941,10 +1968,19 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
     }
 
     override fun onDestroy() {
+        // onCreate bailed out early (e.g. restored after process death): nothing was set up.
+        if (!this::playerManager.isInitialized) {
+            super.onDestroy()
+            return
+        }
+        val media = playerMedia ?: ExoplayerView.media
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         orientationListener?.disable()
         orientationListener = null
-        lifecycleScope.launch(Dispatchers.IO) {
+        val extractor = extractor
+        val video = video
+        // lifecycleScope is already cancelled here, so run the cleanup on an app-wide scope.
+        playerCleanupScope.launch {
             try {
                 extractor?.onVideoStopped(video)
             } catch (_: Exception) {}
@@ -1972,7 +2008,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
                 playerView.player = null
             }
         } catch (_: Exception) {}
-        castManager.release()
+        if (this::castManager.isInitialized) castManager.release()
         pipReceiver?.let {
             try {
                 unregisterReceiver(it)

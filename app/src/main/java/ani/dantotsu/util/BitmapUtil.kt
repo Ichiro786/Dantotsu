@@ -43,6 +43,8 @@ object BitmapUtil {
                 val url = URL(imageUrl)
                 urlConnection = url.openConnection() as HttpURLConnection
                 urlConnection.requestMethod = "GET"
+                urlConnection.connectTimeout = 10_000
+                urlConnection.readTimeout = 15_000
                 urlConnection.connect()
 
                 if (urlConnection.responseCode == HttpURLConnection.HTTP_OK) {

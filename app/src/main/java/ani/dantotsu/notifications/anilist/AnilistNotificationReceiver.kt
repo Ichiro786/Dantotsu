@@ -19,15 +19,20 @@ class AnilistNotificationReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 AnilistNotificationTask().execute(context)
-                val anilistInterval =
-                    AnilistNotificationWorker.checkIntervals[PrefManager.getVal(PrefName.AnilistNotificationInterval)]
-                AlarmManagerScheduler(context).scheduleRepeatingTask(
-                    TaskScheduler.TaskType.ANILIST_NOTIFICATION,
-                    anilistInterval
-                )
             } catch (e: Exception) {
                 Logger.log(e)
             } finally {
+                // re-arm even when the check failed, otherwise the alarm chain stops for good
+                try {
+                    val anilistInterval =
+                        AnilistNotificationWorker.checkIntervals[PrefManager.getVal(PrefName.AnilistNotificationInterval)]
+                    AlarmManagerScheduler(context).scheduleRepeatingTask(
+                        TaskScheduler.TaskType.ANILIST_NOTIFICATION,
+                        anilistInterval
+                    )
+                } catch (e: Exception) {
+                    Logger.log(e)
+                }
                 pendingResult.finish()
             }
         }

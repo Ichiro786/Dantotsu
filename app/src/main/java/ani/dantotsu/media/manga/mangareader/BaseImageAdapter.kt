@@ -437,9 +437,8 @@ abstract class BaseImageAdapter(
                             .transform(*transforms.toTypedArray())
                             .submit()
                             .get()
-                        if (transformed != null && transformed != baseBitmap && !baseBitmap.isRecycled) {
-                            baseBitmap.recycle()
-                        }
+                        // Don't recycle baseBitmap: it may be owned by Glide's memory cache, and a
+                        // later request for the same page would get a recycled bitmap.
                         transformed ?: baseBitmap
                     }
 

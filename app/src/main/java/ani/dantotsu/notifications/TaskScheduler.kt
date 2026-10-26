@@ -17,6 +17,12 @@ interface TaskScheduler {
         }
     }
 
+    /**
+     * Called on every process start. Unlike [scheduleAllTasks] this must not push back
+     * tasks that are already scheduled.
+     */
+    fun ensureAllTasksScheduled(context: Context) = scheduleAllTasks(context)
+
     fun scheduleAllTasks(context: Context) {
         for (taskType in TaskType.entries) {
             val interval = when (taskType) {
@@ -45,26 +51,29 @@ interface TaskScheduler {
             }
         }
 
+        /**
+         * One-off notification checks when the app is opened. KEEP + an initial delay + a
+         * network constraint so they don't compete with the Home load and aren't re-queued
+         * (and restarted) by every activity recreation.
+         */
         fun scheduleSingleWork(context: Context) {
             val workManager = androidx.work.WorkManager.getInstance(context)
-            workManager.enqueueUniqueWork(
-                CommentNotificationWorker.WORK_NAME + "_single",
-                androidx.work.ExistingWorkPolicy.REPLACE,
-                androidx.work.OneTimeWorkRequest.Builder(CommentNotificationWorker::class.java)
-                    .build()
-            )
-            workManager.enqueueUniqueWork(
-                AnilistNotificationWorker.WORK_NAME + "_single",
-                androidx.work.ExistingWorkPolicy.REPLACE,
-                androidx.work.OneTimeWorkRequest.Builder(AnilistNotificationWorker::class.java)
-                    .build()
-            )
-            workManager.enqueueUniqueWork(
-                SubscriptionNotificationWorker.WORK_NAME + "_single",
-                androidx.work.ExistingWorkPolicy.REPLACE,
-                androidx.work.OneTimeWorkRequest.Builder(SubscriptionNotificationWorker::class.java)
-                    .build()
-            )
+            val constraints = androidx.work.Constraints.Builder()
+                .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
+                .build()
+            fun enqueue(name: String, worker: Class<out androidx.work.ListenableWorker>) {
+                workManager.enqueueUniqueWork(
+                    name + "_single",
+                    androidx.work.ExistingWorkPolicy.KEEP,
+                    androidx.work.OneTimeWorkRequest.Builder(worker)
+                        .setConstraints(constraints)
+                        .setInitialDelay(30, java.util.concurrent.TimeUnit.SECONDS)
+                        .build()
+                )
+            }
+            enqueue(CommentNotificationWorker.WORK_NAME, CommentNotificationWorker::class.java)
+            enqueue(AnilistNotificationWorker.WORK_NAME, AnilistNotificationWorker::class.java)
+            enqueue(SubscriptionNotificationWorker.WORK_NAME, SubscriptionNotificationWorker::class.java)
         }
     }
 

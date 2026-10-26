@@ -7,7 +7,6 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import ani.dantotsu.addons.download.DownloadAddonManager
-import ani.dantotsu.torrent.TorrentServerManager
 import ani.dantotsu.connections.comments.CommentsAPI
 import ani.dantotsu.connections.crashlytics.CrashlyticsInterface
 import ani.dantotsu.connections.discord.Discord
@@ -61,7 +60,6 @@ class App : Application(), GraphProvider<AppGraph> {
     private lateinit var animeExtensionManager: AnimeExtensionManager
     private lateinit var mangaExtensionManager: MangaExtensionManager
     private lateinit var novelExtensionManager: NovelExtensionManager
-    private lateinit var torrentServerManager: TorrentServerManager
     private lateinit var downloadAddonManager: DownloadAddonManager
 
     init {
@@ -92,7 +90,11 @@ class App : Application(), GraphProvider<AppGraph> {
         }
         registerActivityLifecycleCallbacks(mFTActivityLifecycleCallbacks)
 
-        runCatching {
+        // LeakCanary/Plumber no longer auto-install (see leak_canary_*_auto_install in strings.xml):
+        // they only run when the user turned on "Detect Memory Leaks".
+        if (PrefManager.getVal<Boolean>(PrefName.TrackMemoryLeaks)) runCatching {
+            leakcanary.AppWatcher.manualInstall(this)
+            leakcanary.AndroidLeakFixes.applyFixes(this)
             leakcanary.LeakCanary.config = leakcanary.LeakCanary.config.copy(
                 dumpHeap = false,
                 dumpHeapWhenDebugging = false
@@ -184,21 +186,30 @@ class App : Application(), GraphProvider<AppGraph> {
             NovelSources.init(novelExtensionManager.allInstalledExtensionsFlow)
         }
         applicationScope.launch(Dispatchers.IO) {
-            torrentServerManager = Injekt.get()
+            // Downloads index is loaded here instead of on the main thread at first access
+            runCatching { Injekt.get<ani.dantotsu.download.DownloadsManager>().warmUp() }
+        }
+        applicationScope.launch(Dispatchers.IO) {
+            // The torrent engine (libtorrent session, DHT, UPnP, HTTP server) is no longer started
+            // on every process start; TorrentServerManager.addTorrent() starts it when needed.
             downloadAddonManager = Injekt.get()
-            if (torrentServerManager.isAvailable()) {
-                torrentServerManager.start()
-            }
             downloadAddonManager.init()
+        }
+        applicationScope.launch(Dispatchers.IO) {
+            // independent of the scheduling below: its 429 retries can take minutes
             if (PrefManager.getVal<Int>(PrefName.CommentsEnabled) == 1) {
                 CommentsAPI.fetchAuthToken(this@App)
             }
-
+        }
+        applicationScope.launch(Dispatchers.IO) {
             val useAlarmManager = PrefManager.getVal<Boolean>(PrefName.UseAlarmManager)
             val scheduler = TaskScheduler.create(this@App, useAlarmManager)
             try {
-                scheduler.scheduleAllTasks(this@App)
-            } catch (e: IllegalStateException) {
+                // the other scheduler's jobs must not keep running in parallel
+                TaskScheduler.create(this@App, !useAlarmManager).cancelAllTasks()
+                // doesn't push back alarms that are already pending
+                scheduler.ensureAllTasksScheduled(this@App)
+            } catch (e: Exception) {
                 Logger.log("Failed to schedule tasks")
                 Logger.log(e)
             }

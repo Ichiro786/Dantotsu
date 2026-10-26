@@ -124,7 +124,7 @@ open class MangaReadFragment : Fragment(), ScanlatorSelectionListener {
                 requireContext(),
                 downloadStatusReceiver,
                 intentFilter,
-                ContextCompat.RECEIVER_EXPORTED
+                ContextCompat.RECEIVER_NOT_EXPORTED
             )
             isReceiverRegistered = true
         }
@@ -556,6 +556,8 @@ open class MangaReadFragment : Fragment(), ScanlatorSelectionListener {
                     val parser =
                         model.mangaReadSources?.get(media.selected!!.sourceIndex) as? DynamicMangaParser
                     parser?.let {
+                        // the service must start even if the user leaves the screen meanwhile
+                        val appContext = requireContext().applicationContext
                         CoroutineScope(Dispatchers.IO).launch {
                             try {
                                 val images = parser.imageList(chapter.sChapter)
@@ -577,14 +579,14 @@ open class MangaReadFragment : Fragment(), ScanlatorSelectionListener {
                                     MangaServiceDataSingleton.downloadQueue.offer(downloadTask)
                                 }
 
-                                val intent = Intent(context, MangaDownloaderService::class.java)
+                                val intent = Intent(appContext, MangaDownloaderService::class.java)
                                 withContext(Dispatchers.Main) {
-                                    ContextCompat.startForegroundService(requireContext(), intent)
+                                    ContextCompat.startForegroundService(appContext, intent)
                                 }
                                 MangaServiceDataSingleton.isServiceRunning = true
                             } catch (e: Exception) {
                                 withContext(Dispatchers.Main) {
-                                    chapterAdapter.purgeDownload(uniqueNum)
+                                    if (_binding != null) chapterAdapter.purgeDownload(uniqueNum)
                                 }
                             }
                         }
@@ -638,8 +640,9 @@ open class MangaReadFragment : Fragment(), ScanlatorSelectionListener {
         val cancelIntent = Intent().apply {
             action = MangaDownloaderService.ACTION_CANCEL_DOWNLOAD
             putExtra(MangaDownloaderService.EXTRA_CHAPTER, i.number)
+            putExtra(MangaDownloaderService.EXTRA_TITLE, media.mainName())
         }
-        requireContext().sendBroadcast(cancelIntent)
+        requireContext().sendBroadcast(cancelIntent.setPackage(requireContext().packageName))
 
         // Remove the download from the manager and update the UI
         downloadManager.removeDownload(

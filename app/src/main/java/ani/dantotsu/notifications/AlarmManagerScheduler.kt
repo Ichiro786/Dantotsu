@@ -14,6 +14,47 @@ import ani.dantotsu.settings.saving.PrefName
 import java.util.concurrent.TimeUnit
 
 class AlarmManagerScheduler(private val context: Context) : TaskScheduler {
+
+    private fun nextTriggerKey(taskType: TaskType) = "alarm_next_trigger_${taskType.name}"
+
+    override fun ensureAllTasksScheduled(context: Context) {
+        val now = System.currentTimeMillis()
+        val missing = TaskType.entries.filter { taskType ->
+            val intent = intentFor(taskType) ?: return@filter true
+            val exists = PendingIntent.getBroadcast(
+                context,
+                taskType.ordinal,
+                intent,
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+            ) != null
+            val next = PrefManager.getCustomVal(nextTriggerKey(taskType), 0L)
+            // only (re)arm alarms that are gone or overdue; re-arming a pending alarm on every
+            // process start pushed it back by a full interval each time
+            !exists || next <= now
+        }
+        for (taskType in missing) {
+            val interval = when (taskType) {
+                TaskType.COMMENT_NOTIFICATION -> ani.dantotsu.notifications.comment.CommentNotificationWorker.checkIntervals[PrefManager.getVal(PrefName.CommentNotificationInterval)]
+                TaskType.ANILIST_NOTIFICATION -> ani.dantotsu.notifications.anilist.AnilistNotificationWorker.checkIntervals[PrefManager.getVal(PrefName.AnilistNotificationInterval)]
+                TaskType.SUBSCRIPTION_NOTIFICATION -> ani.dantotsu.notifications.subscription.SubscriptionNotificationWorker.checkIntervals[PrefManager.getVal(PrefName.SubscriptionNotificationInterval)]
+            }
+            scheduleRepeatingTask(taskType, interval)
+        }
+    }
+
+    private fun intentFor(taskType: TaskType): Intent? = when {
+        taskType == TaskType.COMMENT_NOTIFICATION && PrefManager.getVal<Int>(PrefName.CommentsEnabled) == 1 ->
+            Intent(context, CommentNotificationReceiver::class.java)
+
+        taskType == TaskType.ANILIST_NOTIFICATION ->
+            Intent(context, AnilistNotificationReceiver::class.java)
+
+        taskType == TaskType.SUBSCRIPTION_NOTIFICATION ->
+            Intent(context, SubscriptionNotificationReceiver::class.java)
+
+        else -> null
+    }
+
     override fun scheduleRepeatingTask(taskType: TaskType, interval: Long) {
         if (TimeUnit.MINUTES.toMillis(interval) < TimeUnit.MINUTES.toMillis(15)) {
             cancelTask(taskType)
@@ -42,6 +83,7 @@ class AlarmManagerScheduler(private val context: Context) : TaskScheduler {
         )
 
         val triggerAtMillis = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(interval)
+        PrefManager.setCustomVal(nextTriggerKey(taskType), triggerAtMillis)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 alarmManager.setExactAndAllowWhileIdle(
@@ -82,5 +124,7 @@ class AlarmManagerScheduler(private val context: Context) : TaskScheduler {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         alarmManager.cancel(pendingIntent)
+        pendingIntent.cancel()
+        PrefManager.setCustomVal(nextTriggerKey(taskType), 0L)
     }
 }

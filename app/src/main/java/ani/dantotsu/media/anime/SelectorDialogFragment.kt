@@ -303,10 +303,15 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                     }
                 }
 
-                suspend fun loadEpisodeSingleServer(episodeName: String, selectedServerName: String): Boolean{
+                suspend fun loadEpisodeSingleServer(
+                    episodeName: String,
+                    selectedServerName: String,
+                    updateSelected: Boolean = true
+                ): Boolean{
                     val ep = media?.anime?.episodes?.getEpisode(episodeName) ?: media?.anime?.episodes?.getEpisode(media?.anime?.selectedEpisode)
                     if (ep == null) return false
-                    episode = ep
+                    // batch loads run concurrently; they must not race on the shared field
+                    if (updateSelected) episode = ep
 
                     var success = false
                     scope.launch(Dispatchers.IO) {
@@ -358,16 +363,20 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                             val downloadAddonManager: DownloadAddonManager = Injekt.get()
                             if (!downloadAddonManager.isAvailable()) {
                                 val context = context ?: currContext()
-                                context?.customAlertDialog()?.apply {
-                                    setTitle(R.string.download_addon_not_installed)
-                                    setMessage(R.string.would_you_like_to_install)
-                                    setPosButton(R.string.yes) {
-                                        context.startActivity(
-                                            Intent(context, SettingsAddonActivity::class.java)
-                                        )
+                                // may be called from a background thread (batch download):
+                                // dialogs must be created on the main thread
+                                if (context != null) ContextCompat.getMainExecutor(context).execute {
+                                    context.customAlertDialog().apply {
+                                        setTitle(R.string.download_addon_not_installed)
+                                        setMessage(R.string.would_you_like_to_install)
+                                        setPosButton(R.string.yes) {
+                                            context.startActivity(
+                                                Intent(context, SettingsAddonActivity::class.java)
+                                            )
+                                        }
+                                        setNegButton(R.string.no) { }
+                                        show()
                                     }
-                                    setNegButton(R.string.no) { }
-                                    show()
                                 }
                                 return false
                             }
@@ -465,7 +474,7 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                                         )
                                         putExtra("mediaId", media?.id)
                                     }
-                                act.sendBroadcast(intent)
+                                act.sendBroadcast(intent.setPackage(act.packageName))
                             } else if (selectedVideo == null) {
                                 snackString(R.string.no_video_selected)
                             }
@@ -598,11 +607,15 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
 
                                 scope.launch(Dispatchers.IO) {
                                     val currentEpisodes = episodes ?: return@launch
-                                    val serverSelectionScope = CoroutineScope(Dispatchers.IO)
                                     val serverSelectionTasks = mutableListOf<Deferred<Unit>>()
-                                    for (episodeName in currentEpisodes.drop(1)) {
-                                        serverSelectionTasks.add(serverSelectionScope.async {
-                                            if(!loadEpisodeSingleServer(episodeName, selectedServerName)){
+                                    for (episodeName in currentEpisodes) {
+                                        // the first episode usually already has its servers (the user
+                                        // picked from them); load any episode that doesn't
+                                        val loadedEp = media?.anime?.episodes?.getEpisode(episodeName)
+                                        if (loadedEp?.extractors?.any { it.server.name == selectedServerName } == true) continue
+                                        // child of the fragment scope: cancelled with the dialog
+                                        serverSelectionTasks.add(async {
+                                            if(!loadEpisodeSingleServer(episodeName, selectedServerName, updateSelected = false)){
                                                 Log.d("AnimeDownloader", "Error loading server $selectedServerName for episode $episodeName")
                                                 fail(R.string.auto_select_server_error)
                                             }

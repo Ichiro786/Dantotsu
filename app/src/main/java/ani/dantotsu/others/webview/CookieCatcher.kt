@@ -44,7 +44,10 @@ class CookieCatcher : AppCompatActivity() {
         val ua = headers["User-Agent"] ?: NetworkHelper.defaultUserAgentProvider()
         webView.setUserAgent(ua)
 
-        WebView.setWebContentsDebuggingEnabled(true)
+        // remote WebView inspection only in debuggable builds
+        WebView.setWebContentsDebuggingEnabled(
+            (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        )
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                 super.onPageFinished(view, finishedUrl)

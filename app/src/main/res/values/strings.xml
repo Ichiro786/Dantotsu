@@ -1,6 +1,9 @@
 <resources xmlns:tools="http://schemas.android.com/tools" tools:locale="en-rUS">
 
     <bool name="leak_canary_allow_in_non_debuggable_build">true</bool>
+    <!-- installed manually in App.onCreate only when "Detect Memory Leaks" is on -->
+    <bool name="leak_canary_watcher_auto_install">false</bool>
+    <bool name="leak_canary_plumber_auto_install">false</bool>
     <bool name="leak_canary_add_launcher_icon">false</bool>
     <bool name="leak_canary_add_dynamic_shortcut">false</bool>
     <bool name="leak_canary_display_activity_enabled">false</bool>

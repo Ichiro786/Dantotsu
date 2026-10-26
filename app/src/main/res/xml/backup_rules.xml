@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android <= 11 auto backup / adb backup: never copy account tokens or the app password -->
+<full-backup-content>
+    <include domain="sharedpref" path="." />
+    <include domain="file" path="." />
+    <include domain="database" path="." />
+    <exclude domain="sharedpref" path="ani.dantotsu.protected.xml" />
+</full-backup-content>

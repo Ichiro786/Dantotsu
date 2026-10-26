@@ -65,7 +65,7 @@ class AnilistNotificationTask : Task {
                                     NotificationManagerCompat.from(context)
                                         .notify(
                                             Notifications.CHANNEL_ANILIST,
-                                            System.currentTimeMillis().toInt(),
+                                            it.id, // unique per AniList notification (millis collided in this loop)
                                             notification
                                         )
                                 }

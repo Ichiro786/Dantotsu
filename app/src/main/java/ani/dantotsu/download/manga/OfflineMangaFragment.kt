@@ -216,8 +216,10 @@ class OfflineMangaFragment : Fragment(), OfflineMangaSearchListener {
                 setTitle("Delete ${item.title}?")
                 setMessage("Are you sure you want to delete ${item.title}?")
                 setPosButton(R.string.yes) {
-                    downloadManager.removeMedia(item.title, type)
-                    getDownloads()
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        withContext(Dispatchers.IO) { downloadManager.removeMedia(item.title, type) }
+                        getDownloads()
+                    }
                 }
                 setNegButton(R.string.no)
             }.show()
@@ -274,6 +276,7 @@ class OfflineMangaFragment : Fragment(), OfflineMangaSearchListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        downloadsJob.cancel()
         downloads = listOf()
     }
 

@@ -23,6 +23,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SChapterImpl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 class UpcomingRemoteViewsFactory(private val context: Context) :
     RemoteViewsService.RemoteViewsFactory {
@@ -33,7 +34,9 @@ class UpcomingRemoteViewsFactory(private val context: Context) :
 
     override fun onCreate() {
         Logger.log("UpcomingRemoteViewsFactory onCreate")
-        fillWidgetItems()
+        // onCreate runs on the main thread: cache only. The network refresh happens in
+        // onDataSetChanged, which runs on a binder thread.
+        fillWidgetItems(allowNetwork = false)
     }
 
     private fun formatTime(timeUntil: Long): String {
@@ -67,8 +70,19 @@ class UpcomingRemoteViewsFactory(private val context: Context) :
         fillWidgetItems()
     }
 
-    private fun fillWidgetItems() {
+    private fun fillWidgetItems(allowNetwork: Boolean = true) {
         refreshing = true
+        try {
+            fillWidgetItemsInternal(allowNetwork)
+        } catch (e: Exception) {
+            Logger.log(e)
+        } finally {
+            // a failed refresh used to leave this true forever, so the widget never refreshed again
+            refreshing = false
+        }
+    }
+
+    private fun fillWidgetItemsInternal(allowNetwork: Boolean) {
         val userId = PrefManager.getVal<String>(PrefName.AnilistUserId)
         val prefs = context.getSharedPreferences(UpcomingWidget.PREFS_NAME, Context.MODE_PRIVATE)
         val lastUpdated = prefs.getLong(UpcomingWidget.LAST_UPDATE, 0)
@@ -87,10 +101,11 @@ class UpcomingRemoteViewsFactory(private val context: Context) :
             }
         }
 
-        if (timeSinceLastUpdate > 1000 * 60 * 60 * 4 || serializedMedia.isNullOrEmpty() || forceRefresh) {
+        if (allowNetwork && (timeSinceLastUpdate > 1000 * 60 * 60 * 4 || serializedMedia.isNullOrEmpty() || forceRefresh)) {
             runBlocking(Dispatchers.IO) {
                 Anilist.getSavedToken()
-                val upcoming = Anilist.query.getUpcomingAnime(userId)
+                val upcoming = withTimeoutOrNull(20_000) { Anilist.query.getUpcomingAnime(userId) }
+                    ?: return@runBlocking
                 val seen = mutableSetOf<Int>()
                 upcoming.forEach { mediaItem ->
                     if (seen.add(mediaItem.id)) {
@@ -140,11 +155,12 @@ class UpcomingRemoteViewsFactory(private val context: Context) :
                         }
                     }
                 }
-            } else {
+            } else if (!serializedMedia.isNullOrEmpty()) {
                 prefs.edit().putString(UpcomingWidget.PREF_SERIALIZED_MEDIA, "").apply()
                 prefs.edit().putLong(UpcomingWidget.LAST_UPDATE, 0).apply()
                 Logger.log("Error deserializing media")
-                fillWidgetItems()
+                // cache-only mode (onCreate) leaves the list empty; onDataSetChanged fetches it
+                if (allowNetwork) fillWidgetItemsInternal(true)
             }
         }
     }

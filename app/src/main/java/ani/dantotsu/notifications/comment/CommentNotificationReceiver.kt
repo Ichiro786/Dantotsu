@@ -19,15 +19,20 @@ class CommentNotificationReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 CommentNotificationTask().execute(context)
-                val commentInterval =
-                    CommentNotificationWorker.checkIntervals[PrefManager.getVal(PrefName.CommentNotificationInterval)]
-                AlarmManagerScheduler(context).scheduleRepeatingTask(
-                    TaskScheduler.TaskType.COMMENT_NOTIFICATION,
-                    commentInterval
-                )
             } catch (e: Exception) {
                 Logger.log(e)
             } finally {
+                // re-arm even when the check failed, otherwise the alarm chain stops for good
+                try {
+                    val commentInterval =
+                        CommentNotificationWorker.checkIntervals[PrefManager.getVal(PrefName.CommentNotificationInterval)]
+                    AlarmManagerScheduler(context).scheduleRepeatingTask(
+                        TaskScheduler.TaskType.COMMENT_NOTIFICATION,
+                        commentInterval
+                    )
+                } catch (e: Exception) {
+                    Logger.log(e)
+                }
                 pendingResult.finish()
             }
         }

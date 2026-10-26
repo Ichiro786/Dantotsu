@@ -217,14 +217,16 @@ class OfflineAnimeFragment : Fragment(), OfflineAnimeSearchListener {
                 setTitle("Delete ${item.title}?")
                 setMessage("Are you sure you want to delete ${item.title}?")
                 setPosButton(R.string.yes) {
-                    downloadManager.removeMedia(item.title, type)
-                    val mediaIds =
-                        PrefManager.getAnimeDownloadPreferences().all?.filter { it.key.contains(item.title) }?.values
-                            ?: emptySet()
-                    if (mediaIds.isEmpty()) {
-                        snackString("No media found")  // if this happens, terrible things have happened
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        withContext(Dispatchers.IO) { downloadManager.removeMedia(item.title, type) }
+                        val mediaIds =
+                            PrefManager.getAnimeDownloadPreferences().all?.filter { it.key.contains(item.title) }?.values
+                                ?: emptySet()
+                        if (mediaIds.isEmpty()) {
+                            snackString("No media found")  // if this happens, terrible things have happened
+                        }
+                        getDownloads()
                     }
-                    getDownloads()
                 }
                 setNegButton(R.string.no) {
                     // Do nothing
@@ -283,6 +285,7 @@ class OfflineAnimeFragment : Fragment(), OfflineAnimeSearchListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        downloadsJob.cancel()
         downloads = listOf()
     }
 

@@ -443,6 +443,8 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
 
             Logger.log("query: $query")
             convertAnimesPageToShowResponse(res)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e // a cancelled search (typing, screen closed) is not an error
         } catch (e: CloudflareBypassException) {
             Logger.log("Exception in search: $e")
             Logger.log(e)
@@ -666,6 +668,8 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
         return try {
             val res = try {
                 source.getSearchManga(1, query, source.getFilterList())
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e // don't retry a cancelled search through the Rx fallback
             } catch (e: Throwable) {
                 if (source is CatalogueSource) {
                     source.fetchSearchManga(1, query, source.getFilterList()).awaitSingle()
@@ -675,6 +679,8 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
             }
             Logger.log("res observable: $res")
             convertMangasPageToShowResponse(res)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: CloudflareBypassException) {
             Logger.log("Exception in search: $e")
             withContext(Dispatchers.Main) {

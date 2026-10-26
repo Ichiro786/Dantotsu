@@ -26,6 +26,7 @@ import tachiyomi.domain.source.manga.service.MangaSourceManager
 import uy.kohesive.injekt.api.InjektModule
 import uy.kohesive.injekt.api.InjektRegistrar
 import uy.kohesive.injekt.api.addSingleton
+import uy.kohesive.injekt.api.addSingletonFactory
 
 @OptIn(ExperimentalSerializationApi::class)
 @Inject
@@ -34,22 +35,24 @@ class MetroInteropModule(
     private val preferenceStore: PreferenceStore,
     private val sourcePreferences: SourcePreferences,
     private val basePreferences: BasePreferences,
-    private val downloadsManager: DownloadsManager,
+    private val downloadsManager: Lazy<DownloadsManager>,
     private val networkHelper: NetworkHelper,
-    private val javaScriptEngine: JavaScriptEngine,
-    private val animeExtensionManager: AnimeExtensionManager,
-    private val mangaExtensionManager: MangaExtensionManager,
-    private val novelExtensionManager: NovelExtensionManager,
-    private val torrentServerManager: TorrentServerManager,
-    private val downloadAddonManager: DownloadAddonManager,
-    private val animeSourceManager: AnimeSourceManager,
-    private val mangaSourceManager: MangaSourceManager,
-    private val mangaCache: MangaCache,
-    private val databaseProvider: StandaloneDatabaseProvider,
+    private val javaScriptEngine: Lazy<JavaScriptEngine>,
+    private val animeExtensionManager: Lazy<AnimeExtensionManager>,
+    private val mangaExtensionManager: Lazy<MangaExtensionManager>,
+    private val novelExtensionManager: Lazy<NovelExtensionManager>,
+    private val torrentServerManager: Lazy<TorrentServerManager>,
+    private val downloadAddonManager: Lazy<DownloadAddonManager>,
+    private val animeSourceManager: Lazy<AnimeSourceManager>,
+    private val mangaSourceManager: Lazy<MangaSourceManager>,
+    private val mangaCache: Lazy<MangaCache>,
+    private val databaseProvider: Lazy<StandaloneDatabaseProvider>,
     private val json: Json,
     private val protoBuf: ProtoBuf,
 ) : InjektModule {
 
+    // Heavy singletons are injected as Lazy and registered as factories, so building this
+    // module in Application.onCreate no longer constructs all of them on the main thread.
     override fun InjektRegistrar.registerInjectables() {
         addSingleton(context)
         if (context is Application) {
@@ -60,23 +63,23 @@ class MetroInteropModule(
         addSingleton(sourcePreferences)
         addSingleton(basePreferences)
 
-        addSingleton(downloadsManager)
+        addSingletonFactory { downloadsManager.value }
         addSingleton(networkHelper)
         addSingleton(networkHelper.client)
-        addSingleton(javaScriptEngine)
+        addSingletonFactory { javaScriptEngine.value }
 
-        addSingleton(animeExtensionManager)
-        addSingleton(mangaExtensionManager)
-        addSingleton(novelExtensionManager)
-        addSingleton(torrentServerManager)
-        addSingleton(downloadAddonManager)
+        addSingletonFactory { animeExtensionManager.value }
+        addSingletonFactory { mangaExtensionManager.value }
+        addSingletonFactory { novelExtensionManager.value }
+        addSingletonFactory { torrentServerManager.value }
+        addSingletonFactory { downloadAddonManager.value }
 
-        addSingleton(animeSourceManager)
-        addSingleton(mangaSourceManager)
+        addSingletonFactory { animeSourceManager.value }
+        addSingletonFactory { mangaSourceManager.value }
 
         addSingleton(json)
         addSingleton(protoBuf)
-        addSingleton(databaseProvider)
-        addSingleton(mangaCache)
+        addSingletonFactory { databaseProvider.value }
+        addSingletonFactory { mangaCache.value }
     }
 }

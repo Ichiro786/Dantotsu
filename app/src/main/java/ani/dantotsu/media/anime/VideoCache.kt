@@ -10,20 +10,19 @@ import java.io.File
 @UnstableApi
 object VideoCache {
     private var simpleCache: SimpleCache? = null
+
+    @Synchronized
     fun getInstance(context: Context): SimpleCache {
-        val databaseProvider = StandaloneDatabaseProvider(context)
-        if (simpleCache == null)
-            simpleCache = SimpleCache(
-                File(
-                    context.cacheDir,
-                    "exoplayer"
-                ).also { it.deleteOnExit() }, // Ensures always fresh file
-                LeastRecentlyUsedCacheEvictor(300L * 1024L * 1024L),
-                databaseProvider
-            )
-        return simpleCache as SimpleCache
+        simpleCache?.let { return it }
+        val databaseProvider = StandaloneDatabaseProvider(context.applicationContext)
+        return SimpleCache(
+            File(context.cacheDir, "exoplayer"),
+            LeastRecentlyUsedCacheEvictor(300L * 1024L * 1024L),
+            databaseProvider
+        ).also { simpleCache = it }
     }
 
+    @Synchronized
     fun release() {
         simpleCache?.release()
         simpleCache = null

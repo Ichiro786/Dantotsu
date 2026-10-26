@@ -234,7 +234,8 @@ class InstalledNovelExtensionsFragment : Fragment(), SearchQueryHandler {
         ItemTouchHelper(itemTouchHelperCallback).attachToRecyclerView(extensionsRecyclerView)
 
 
-        lifecycleScope.launch {
+        // view lifecycle: a Fragment-scoped collector piled up (and leaked) on every view recreation
+        viewLifecycleOwner.lifecycleScope.launch {
             novelExtensionManager.allInstalledExtensionsFlow.collect { extensions ->
                 extensionsAdapter.updateData(sortToNovelSourcesList(extensions))
             }

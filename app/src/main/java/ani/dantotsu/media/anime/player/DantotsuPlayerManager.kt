@@ -435,8 +435,8 @@ class DantotsuPlayerManager(
         this.exoPlayer = player
         playerView.player = player
 
-        audioFocusListener = AudioFocusListener(activity, player)
-        player.addListener(audioFocusListener!!)
+        // Audio focus is handled by ExoPlayer itself (setAudioAttributes(..., true)); a second
+        // focus listener used to fight it and resumed playback the user had paused.
 
         Logger.log("Libass: Calling handler.init(exoPlayer)")
         handler.init(player)
@@ -481,7 +481,8 @@ class DantotsuPlayerManager(
 
     fun release() {
         releaseExoPlayer()
-        VideoCache.release()
+        // VideoCache is process-wide and may already be used by a newly started player
+        // instance, so it is not released per activity.
         subtitleManager.release()
     }
 }

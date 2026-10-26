@@ -218,7 +218,8 @@ class InstalledAnimeExtensionsFragment : Fragment(), SearchQueryHandler {
         ItemTouchHelper(itemTouchHelperCallback).attachToRecyclerView(extensionsRecyclerView)
 
 
-        lifecycleScope.launch {
+        // view lifecycle: a Fragment-scoped collector piled up (and leaked) on every view recreation
+        viewLifecycleOwner.lifecycleScope.launch {
             animeExtensionManager.installedExtensionsFlow.collect { extensions ->
                 extensionsAdapter.updateData(sortToAnimeSourcesList(extensions))
             }

@@ -75,7 +75,7 @@ class AnimeExtensionManager(
      */
     private val installer by lazy { ExtensionInstaller(context) }
 
-    private val iconMap = mutableMapOf<String, Drawable>()
+    private val iconMap = java.util.concurrent.ConcurrentHashMap<String, Drawable>()
 
     private val _installedAnimeExtensionsFlow =
         MutableStateFlow(emptyList<AnimeExtension.Installed>())
@@ -88,7 +88,12 @@ class AnimeExtensionManager(
             _installedAnimeExtensionsFlow.value.find { ext -> ext.sources.any { it.id == sourceId } }?.pkgName
         if (pkgName != null) {
             return iconMap[pkgName]
-                ?: iconMap.getOrPut(pkgName) { context.packageManager.getApplicationIcon(pkgName) }
+                ?: try {
+                    // private (.ext) extensions aren't installed packages
+                    context.packageManager.getApplicationIcon(pkgName).also { iconMap[pkgName] = it }
+                } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
+                    null
+                }
         }
         return null
     }

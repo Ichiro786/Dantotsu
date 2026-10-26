@@ -437,13 +437,18 @@ class SettingsNotificationActivity : AppCompatActivity() {
                                      setMessage(R.string.use_alarm_manager_confirm)
                                      setPosButton(R.string.use) {
                                         PrefManager.setVal(PrefName.UseAlarmManager, true)
-                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                            if (!(getSystemService(Context.ALARM_SERVICE) as AlarmManager).canScheduleExactAlarms()) {
-                                                val intent =
-                                                    Intent("android.settings.REQUEST_SCHEDULE_EXACT_ALARM", android.net.Uri.parse("package:${context.packageName}"))
-                                                startActivity(intent)
-                                                view.settingsButton.isChecked = true
-                                            }
+                                        val canSchedule = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                                            (getSystemService(Context.ALARM_SERVICE) as AlarmManager).canScheduleExactAlarms()
+                                        if (!canSchedule) {
+                                            // AlarmPermissionStateReceiver switches the schedulers once granted
+                                            val intent =
+                                                Intent("android.settings.REQUEST_SCHEDULE_EXACT_ALARM", android.net.Uri.parse("package:${context.packageName}"))
+                                            startActivity(intent)
+                                            view.settingsButton.isChecked = true
+                                        } else {
+                                            // stop the WorkManager jobs, otherwise every check runs twice
+                                            TaskScheduler.create(context, false).cancelAllTasks()
+                                            TaskScheduler.create(context, true).scheduleAllTasks(context)
                                         }
                                     }
                                     setNegButton(R.string.cancel) {

@@ -339,19 +339,21 @@ class DownloadQueueActivity : AppCompatActivity() {
                 val intent = Intent(AnimeDownloaderService.ACTION_CANCEL_DOWNLOAD).apply {
                     putExtra(AnimeDownloaderService.EXTRA_TASK_NAME, item.uniqueId)
                 }
-                sendBroadcast(intent)
+                sendBroadcast(intent.setPackage(packageName))
             }
             is QueueItem.Manga -> {
                 val intent = Intent(MangaDownloaderService.ACTION_CANCEL_DOWNLOAD).apply {
                     putExtra(MangaDownloaderService.EXTRA_CHAPTER, item.uniqueId)
+                    putExtra(MangaDownloaderService.EXTRA_TITLE, item.task.title)
                 }
-                sendBroadcast(intent)
+                sendBroadcast(intent.setPackage(packageName))
             }
             is QueueItem.Novel -> {
                 val intent = Intent(NovelDownloaderService.ACTION_CANCEL_DOWNLOAD).apply {
                     putExtra(NovelDownloaderService.EXTRA_CHAPTER, item.uniqueId)
+                    putExtra(NovelDownloaderService.EXTRA_TITLE, item.task.title)
                 }
-                sendBroadcast(intent)
+                sendBroadcast(intent.setPackage(packageName))
             }
         }
         startUpdating()
@@ -363,10 +365,13 @@ class DownloadQueueActivity : AppCompatActivity() {
             setMessage(getString(R.string.clear_media_confirm, title))
             setPosButton(R.string.yes) {
                 val downloadsManager = Injekt.get<DownloadsManager>()
-                downloadsManager.removeMedia(title, type)
-                folderSizeCache.remove(title)
-                updateDownloadedMediaSizes(getSelectedMediaType())
-                startUpdating()
+                lifecycleScope.launch {
+                    // recursive SAF delete: keep it off the main thread
+                    withContext(Dispatchers.IO) { downloadsManager.removeMedia(title, type) }
+                    folderSizeCache.remove(title)
+                    updateDownloadedMediaSizes(getSelectedMediaType())
+                    startUpdating()
+                }
             }
             setNegButton(R.string.no)
             show()
@@ -385,23 +390,25 @@ class DownloadQueueActivity : AppCompatActivity() {
             val intent = Intent(AnimeDownloaderService.ACTION_CANCEL_DOWNLOAD).apply {
                 putExtra(AnimeDownloaderService.EXTRA_TASK_NAME, task.getTaskName())
             }
-            sendBroadcast(intent)
+            sendBroadcast(intent.setPackage(packageName))
         }
 
         val mangaActive = MangaServiceDataSingleton.currentTasks.toList()
         for (task in mangaActive) {
             val intent = Intent(MangaDownloaderService.ACTION_CANCEL_DOWNLOAD).apply {
                 putExtra(MangaDownloaderService.EXTRA_CHAPTER, task.chapter)
+                putExtra(MangaDownloaderService.EXTRA_TITLE, task.title)
             }
-            sendBroadcast(intent)
+            sendBroadcast(intent.setPackage(packageName))
         }
 
         val novelActive = NovelServiceDataSingleton.currentTasks.toList()
         for (task in novelActive) {
             val intent = Intent(NovelDownloaderService.ACTION_CANCEL_DOWNLOAD).apply {
                 putExtra(NovelDownloaderService.EXTRA_CHAPTER, task.chapter)
+                putExtra(NovelDownloaderService.EXTRA_TITLE, task.title)
             }
-            sendBroadcast(intent)
+            sendBroadcast(intent.setPackage(packageName))
         }
 
         startUpdating()

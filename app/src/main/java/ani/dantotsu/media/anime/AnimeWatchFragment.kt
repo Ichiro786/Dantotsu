@@ -127,7 +127,7 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
                 requireContext(),
                 downloadStatusReceiver,
                 intentFilter,
-                ContextCompat.RECEIVER_EXPORTED
+                ContextCompat.RECEIVER_NOT_EXPORTED
             )
             isReceiverRegistered = true
         }
@@ -357,7 +357,9 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
             if (i != null) {
                 media.anime?.kitsuEpisodes = i
                 if (loaded) {
-                    loadEpisodes(media.selected!!.sourceIndex, false)
+                    // just re-apply metadata to the episodes we already have; calling
+                    // loadEpisodes here started duplicate extension fetches
+                    model.repostEpisodes()
                 }
             }
         }
@@ -366,7 +368,9 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
             if (i != null) {
                 media.anime?.fillerEpisodes = i
                 if (loaded) {
-                    loadEpisodes(media.selected!!.sourceIndex, false)
+                    // just re-apply metadata to the episodes we already have; calling
+                    // loadEpisodes here started duplicate extension fetches
+                    model.repostEpisodes()
                 }
             }
         }
@@ -374,7 +378,9 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
             if (i != null) {
                 media.anime?.anifyEpisodes = i
                 if (loaded) {
-                    loadEpisodes(media.selected!!.sourceIndex, false)
+                    // just re-apply metadata to the episodes we already have; calling
+                    // loadEpisodes here started duplicate extension fetches
+                    model.repostEpisodes()
                 }
             }
         }
@@ -785,7 +791,7 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
                 AnimeDownloaderService.AnimeDownloadTask.getTaskName(media.mainName(), i)
             )
         }
-        requireContext().sendBroadcast(cancelIntent)
+        requireContext().sendBroadcast(cancelIntent.setPackage(requireContext().packageName))
 
         // Remove partial files from the manager
         downloadManager.removeDownload(
@@ -962,7 +968,7 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
         headerAdapter.handleEpisodes()
         val isDownloaded = model.watchSources!!.isDownloadedSource(media.selected!!.sourceIndex)
         episodeAdapter.offlineMode = isDownloaded
-        episodeAdapter.notifyItemRangeRemoved(0, episodeAdapter.arr.size)
+        val oldSize = episodeAdapter.arr.size
         var arr: ArrayList<Episode> = arrayListOf()
         if (media.anime!!.episodes != null) {
             val end = if (end != null && end!! < media.anime!!.episodes!!.size) end else null
@@ -975,14 +981,29 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
         }
         episodeAdapter.arr = arr
         episodeAdapter.updateType(style ?: PrefManager.getVal(PrefName.AnimeDefaultView))
-        episodeAdapter.notifyItemRangeInserted(0, arr.size)
+        // update in place instead of removing + re-inserting every row (flicker, lost scroll)
+        val common = minOf(oldSize, arr.size)
+        if (common > 0) episodeAdapter.notifyItemRangeChanged(0, common)
+        if (arr.size > oldSize) episodeAdapter.notifyItemRangeInserted(oldSize, arr.size - oldSize)
+        else if (oldSize > arr.size) episodeAdapter.notifyItemRangeRemoved(arr.size, oldSize - arr.size)
         episodeAdapter.clearAllDownloaded()
-        for (download in downloadManager.animeDownloadedTypes) {
-            if (media.compareName(download.titleName)) {
-                episodeAdapter.addToDownloadedEpisodes(download.chapterName, downloadManager.getSize(download))
+        // download sizes may need a storage scan: compute them off the main thread
+        downloadSizeJob?.cancel()
+        val currentMedia = media
+        downloadSizeJob = viewLifecycleOwner.lifecycleScope.launch {
+            val downloaded = withContext(Dispatchers.IO) {
+                downloadManager.animeDownloadedTypes
+                    .filter { currentMedia.compareName(it.titleName) }
+                    .map { it.chapterName to downloadManager.getSize(it) }
+            }
+            if (_binding == null) return@launch
+            downloaded.forEach { (chapter, size) ->
+                episodeAdapter.addToDownloadedEpisodes(chapter, size)
             }
         }
     }
+
+    private var downloadSizeJob: kotlinx.coroutines.Job? = null
 
     override fun onDestroyView() {
         if (isReceiverRegistered) {

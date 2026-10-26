@@ -47,12 +47,19 @@ import ani.dantotsu.util.Logger
 import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.source.model.SManga
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.serialization.json.Json
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -721,13 +728,47 @@ class MediaDetailsViewModel : ViewModel() {
     var watchSources: WatchSources? = null
 
     private val episodes = MutableLiveData<MutableMap<Int, MutableMap<String, Episode>>>(null)
-    private val epsLoaded = mutableMapOf<Int, MutableMap<String, Episode>>()
+    // written from several IO coroutines and read on main
+    private val epsLoaded: MutableMap<Int, MutableMap<String, Episode>> = ConcurrentHashMap()
+    // one in-flight episode load per source, so concurrent callers share it
+    private val episodeLoadJobs = ConcurrentHashMap<Int, Deferred<Unit>>()
     fun getEpisodes(): LiveData<MutableMap<Int, MutableMap<String, Episode>>> = episodes
     fun invalidateSource(sourceIndex: Int) {
         epsLoaded.remove(sourceIndex)
     }
 
+    /** Re-posts the already loaded episodes (e.g. after episode metadata arrived). */
+    fun repostEpisodes() {
+        if (epsLoaded.isNotEmpty()) episodes.postValue(epsLoaded)
+    }
+
     suspend fun loadEpisodes(media: Media, i: Int, invalidate: Boolean = false) {
+        if (!invalidate) {
+            val running = episodeLoadJobs[i]
+            if (running != null && running.isActive) {
+                try {
+                    running.await()
+                } catch (e: CancellationException) {
+                    currentCoroutineContext().ensureActive()
+                }
+                if (!epsLoaded[i].isNullOrEmpty()) {
+                    episodes.postValue(epsLoaded)
+                    return
+                }
+            }
+        }
+        coroutineScope {
+            val job = async { loadEpisodesInternal(media, i, invalidate) }
+            episodeLoadJobs[i] = job
+            try {
+                job.await()
+            } finally {
+                episodeLoadJobs.remove(i, job)
+            }
+        }
+    }
+
+    private suspend fun loadEpisodesInternal(media: Media, i: Int, invalidate: Boolean) {
         val isOffline = watchSources?.get(i) is OfflineAnimeParser
         val current = epsLoaded[i]
         if (current.isNullOrEmpty() || invalidate || isOffline) {
@@ -776,7 +817,8 @@ class MediaDetailsViewModel : ViewModel() {
         val link = ep.link ?: return
         if (!ep.allStreams || ep.extractors.isNullOrEmpty()) {
             val existingExtractors = ep.extractors?.toMutableList() ?: mutableListOf()
-            val list = mutableListOf<VideoExtractor>()
+            // filled from several IO threads (asyncMap) while the UI reads it
+            val list: MutableList<VideoExtractor> = CopyOnWriteArrayList()
             ep.extractors = list
             watchSources?.get(i)?.apply {
                 if (!post && !allowsPreloading) return@apply
@@ -973,7 +1015,7 @@ class MediaDetailsViewModel : ViewModel() {
 
     private val mangaChapters =
         MutableLiveData<MutableMap<Int, MutableMap<String, MangaChapter>>>(null)
-    private val mangaLoaded = mutableMapOf<Int, MutableMap<String, MangaChapter>>()
+    private val mangaLoaded: MutableMap<Int, MutableMap<String, MangaChapter>> = ConcurrentHashMap()
     fun getMangaChapters(): LiveData<MutableMap<Int, MutableMap<String, MangaChapter>>> =
         mangaChapters
 

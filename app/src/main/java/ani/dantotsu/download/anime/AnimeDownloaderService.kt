@@ -115,7 +115,7 @@ class AnimeDownloaderService : Service() {
             this,
             cancelReceiver,
             IntentFilter(ACTION_CANCEL_DOWNLOAD),
-            ContextCompat.RECEIVER_EXPORTED
+            ContextCompat.RECEIVER_NOT_EXPORTED
         )
     }
 
@@ -725,7 +725,7 @@ class AnimeDownloaderService : Service() {
             putExtra("mediaId", mediaId)
             putExtra("size", size)
         }
-        sendBroadcast(intent)
+        sendAppBroadcast(intent)
     }
 
     private fun broadcastDownloadFailed(episodeNumber: String, mediaId: Int?) {
@@ -733,7 +733,7 @@ class AnimeDownloaderService : Service() {
             putExtra(AnimeWatchFragment.EXTRA_EPISODE_NUMBER, episodeNumber)
             putExtra("mediaId", mediaId)
         }
-        sendBroadcast(intent)
+        sendAppBroadcast(intent)
     }
 
     private fun broadcastDownloadProgress(
@@ -750,8 +750,11 @@ class AnimeDownloaderService : Service() {
             putExtra(AnimeWatchFragment.EXTRA_DOWNLOADED_BYTES, downloadedBytes)
             putExtra(AnimeWatchFragment.EXTRA_ESTIMATED_TOTAL_BYTES, estimatedTotalBytes)
         }
-        sendBroadcast(intent)
+        sendAppBroadcast(intent)
     }
+
+    // explicit to our own package: other apps can neither spoof nor observe these
+    private fun sendAppBroadcast(intent: Intent) = sendBroadcast(intent.setPackage(packageName))
 
     private val cancelReceiver = object : BroadcastReceiver() {
         @androidx.annotation.OptIn(UnstableApi::class)
@@ -792,7 +795,8 @@ class AnimeDownloaderService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 1103
-        const val ACTION_CANCEL_DOWNLOAD = "action_cancel_download"
+        // per-type, package-qualified action (all three services used to share one)
+        const val ACTION_CANCEL_DOWNLOAD = "ani.dantotsu.ACTION_CANCEL_ANIME_DOWNLOAD"
         const val EXTRA_TASK_NAME = "extra_task_name"
     }
 }

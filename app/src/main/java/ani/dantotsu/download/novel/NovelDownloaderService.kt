@@ -91,7 +91,7 @@ class NovelDownloaderService : Service() {
             setProgress(0, 0, false)
         }
         startForegroundNotification()
-        ContextCompat.registerReceiver(this, cancelReceiver, IntentFilter(ACTION_CANCEL_DOWNLOAD), ContextCompat.RECEIVER_EXPORTED)
+        ContextCompat.registerReceiver(this, cancelReceiver, IntentFilter(ACTION_CANCEL_DOWNLOAD), ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     private fun startForegroundNotification() {
@@ -197,19 +197,23 @@ class NovelDownloaderService : Service() {
         }
     }
 
-    fun cancelDownload(chapter: String) {
-        val tasks = NovelServiceDataSingleton.downloadQueue.filter { it.chapter == chapter }
+    fun cancelDownload(chapter: String, title: String? = null) {
+        fun DownloadTask.matches() = this.chapter == chapter && (title == null || this.title == title)
+        val tasks = NovelServiceDataSingleton.downloadQueue.filter { it.matches() }
         tasks.forEach { task ->
             broadcastDownloadFailed(task.originalLink)
         }
         serviceScope.launch {
             mutex.withLock {
-                val toCancel = downloadJobs.filter { it.key == chapter || it.key.endsWith("_$chapter") }
+                val toCancel = downloadJobs.filter {
+                    if (title != null) it.key == "${title}_$chapter"
+                    else it.key == chapter || it.key.endsWith("_$chapter")
+                }
                 toCancel.forEach { (k, j) ->
                     j.cancel()
                     downloadJobs.remove(k)
                 }
-                NovelServiceDataSingleton.downloadQueue.removeAll { it.chapter == chapter }
+                NovelServiceDataSingleton.downloadQueue.removeAll { it.matches() }
                 updateNotification()
             }
         }
@@ -499,24 +503,27 @@ class NovelDownloaderService : Service() {
         }
 
     private fun broadcastDownloadStarted(link: String) =
-        sendBroadcast(Intent(NovelReadFragment.ACTION_DOWNLOAD_STARTED).apply { putExtra(NovelReadFragment.EXTRA_NOVEL_LINK, link) })
+        sendAppBroadcast(Intent(NovelReadFragment.ACTION_DOWNLOAD_STARTED).apply { putExtra(NovelReadFragment.EXTRA_NOVEL_LINK, link) })
 
     private fun broadcastDownloadFinished(link: String) =
-        sendBroadcast(Intent(NovelReadFragment.ACTION_DOWNLOAD_FINISHED).apply { putExtra(NovelReadFragment.EXTRA_NOVEL_LINK, link) })
+        sendAppBroadcast(Intent(NovelReadFragment.ACTION_DOWNLOAD_FINISHED).apply { putExtra(NovelReadFragment.EXTRA_NOVEL_LINK, link) })
 
     private fun broadcastDownloadFailed(link: String) =
-        sendBroadcast(Intent(NovelReadFragment.ACTION_DOWNLOAD_FAILED).apply { putExtra(NovelReadFragment.EXTRA_NOVEL_LINK, link) })
+        sendAppBroadcast(Intent(NovelReadFragment.ACTION_DOWNLOAD_FAILED).apply { putExtra(NovelReadFragment.EXTRA_NOVEL_LINK, link) })
 
     private fun broadcastDownloadProgress(link: String, progress: Int) =
-        sendBroadcast(Intent(NovelReadFragment.ACTION_DOWNLOAD_PROGRESS).apply {
+        sendAppBroadcast(Intent(NovelReadFragment.ACTION_DOWNLOAD_PROGRESS).apply {
             putExtra(NovelReadFragment.EXTRA_NOVEL_LINK, link)
             putExtra("progress", progress)
         })
 
+    // explicit to our own package: other apps can neither spoof nor observe these
+    private fun sendAppBroadcast(intent: Intent) = sendBroadcast(intent.setPackage(packageName))
+
     private val cancelReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_CANCEL_DOWNLOAD)
-                intent.getStringExtra(EXTRA_CHAPTER)?.let { cancelDownload(it) }
+                intent.getStringExtra(EXTRA_CHAPTER)?.let { cancelDownload(it, intent.getStringExtra(EXTRA_TITLE)) }
         }
     }
 
@@ -533,8 +540,10 @@ class NovelDownloaderService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 1103
-        const val ACTION_CANCEL_DOWNLOAD = "action_cancel_download"
+        // per-type, package-qualified action (all three services used to share one)
+        const val ACTION_CANCEL_DOWNLOAD = "ani.dantotsu.ACTION_CANCEL_NOVEL_DOWNLOAD"
         const val EXTRA_CHAPTER = "extra_chapter"
+        const val EXTRA_TITLE = "extra_title"
     }
 }
 

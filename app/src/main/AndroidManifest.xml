@@ -68,6 +68,8 @@
     <application
         android:name=".App"
         android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:banner="@mipmap/ic_banner_foreground"
         android:enableOnBackInvokedCallback="true"
         android:icon="${icon_placeholder}"
@@ -281,7 +283,7 @@
         <activity
             android:name=".media.manga.mangareader.MangaReaderActivity"
             android:excludeFromRecents="true"
-            android:exported="true"
+            android:exported="false"
             android:label="@string/manga"
             android:launchMode="singleTask" />
         <activity android:name=".media.GenreActivity" />
@@ -297,14 +299,14 @@
         <activity android:name=".home.NoInternet" />
         <activity android:name=".others.CrashActivity"
             android:excludeFromRecents="true"
-            android:exported="true"
+            android:exported="false"
             android:process=":error_process"
             android:launchMode="singleTask" />
         <activity
             android:name=".media.anime.ExoplayerView"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation"
             android:excludeFromRecents="true"
-            android:exported="true"
+            android:exported="false"
             android:label="@string/video"
             android:launchMode="singleTask"
             android:supportsPictureInPicture="true"
@@ -363,20 +365,10 @@
             android:name=".others.webview.CookieCatcher"
             android:configChanges="orientation|screenSize|layoutDirection"
             android:excludeFromRecents="true"
-            android:exported="true"
-            android:launchMode="singleTask">
-            <intent-filter android:label="Discord Login for Dantotsu">
-                <action android:name="android.intent.action.VIEW" />
-
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-
-                <data android:scheme="dantotsu" />
-                <data android:scheme="http" />
-                <data android:scheme="https" />
-                <data android:host="discord.dantotsu.com" />
-            </intent-filter>
-        </activity>
+            android:exported="false"
+            android:launchMode="singleTask" />
+        <!-- CookieCatcher loads any "url" extra with the shared cookie jar, so it is not exported.
+             The old discord.dantotsu.com VIEW filter was unused (the activity ignored intent data). -->
         <activity
             android:name=".connections.anilist.UrlMedia"
             android:configChanges="orientation|screenSize|layoutDirection"

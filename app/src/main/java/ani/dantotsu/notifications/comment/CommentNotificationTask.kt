@@ -29,7 +29,7 @@ class CommentNotificationTask : Task {
         try {
             withContext(Dispatchers.IO) {
                 PrefManager.init(context) //make sure prefs are initialized
-                val client = OkHttpClient()
+                val client = commentsClient
                 CommentsAPI.fetchAuthToken(context, client)
                 val notificationResponse = CommentsAPI.getNotifications(client)
                 var notifications = notificationResponse?.notifications?.toMutableList()
@@ -173,7 +173,7 @@ class CommentNotificationTask : Task {
                             NotificationManagerCompat.from(context)
                                 .notify(
                                     type.id,
-                                    System.currentTimeMillis().toInt(),
+                                    nextNotificationId.incrementAndGet(),
                                     notification
                                 )
                         }
@@ -332,3 +332,10 @@ class CommentNotificationTask : Task {
 
     private fun Int?.isGlobal() = this == 3 || this == 420
 }
+
+// System.currentTimeMillis().toInt() gave several notifications posted in one loop the same id
+private val nextNotificationId =
+    java.util.concurrent.atomic.AtomicInteger((System.currentTimeMillis() / 1000).toInt())
+
+// One client per process instead of a new connection pool + dispatcher on every run
+private val commentsClient: OkHttpClient by lazy { OkHttpClient() }

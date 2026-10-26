@@ -8,11 +8,15 @@ import okhttp3.HttpUrl
 
 class AndroidCookieJar : CookieJar {
 
-    val manager: CookieManager? = try {
-        CookieManager.getInstance()
-    } catch (e: Exception) {
-        snackString("Webview is outdated, please update your webview")
-        null
+    // Lazy: CookieManager.getInstance() loads WebView/Chromium (50-300 ms). Doing it when the
+    // first request needs cookies keeps it out of Application.onCreate.
+    val manager: CookieManager? by lazy {
+        try {
+            CookieManager.getInstance()
+        } catch (e: Exception) {
+            snackString("Webview is outdated, please update your webview")
+            null
+        }
     }
 
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
@@ -38,7 +42,8 @@ class AndroidCookieJar : CookieJar {
 
     fun remove(url: HttpUrl, cookieNames: List<String>? = null, maxAge: Int = -1): Int {
         val urlString = url.toString()
-        val cookies = manager?.getCookie(urlString) ?: return 0
+        val manager = manager ?: return 0
+        val cookies = manager.getCookie(urlString) ?: return 0
 
         fun List<String>.filterNames(): List<String> {
             return if (cookieNames != null) {
@@ -58,7 +63,8 @@ class AndroidCookieJar : CookieJar {
     }
 
     fun removeAll() {
-        manager?.removeAllCookies {
+        val manager = manager ?: return
+        manager.removeAllCookies {
             manager.flush()
         }
     }

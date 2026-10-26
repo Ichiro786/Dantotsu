@@ -144,7 +144,7 @@ class SubscriptionNotificationTask : Task {
                             NotificationManagerCompat.from(context)
                                 .notify(
                                     CHANNEL_SUBSCRIPTION_CHECK,
-                                    System.currentTimeMillis().toInt(),
+                                    media.id, // one notification per show (millis collided in this loop)
                                     notification
                                 )
                         }

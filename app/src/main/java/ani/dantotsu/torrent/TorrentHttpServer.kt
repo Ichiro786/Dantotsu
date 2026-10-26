@@ -18,12 +18,14 @@ class TorrentHttpServer(
 ) {
     private var serverSocket: ServerSocket? = null
     private val executor = Executors.newCachedThreadPool()
+    @Volatile
     private var isRunning = false
 
     fun start() {
         isRunning = true
         try {
-            serverSocket = ServerSocket(port)
+            // loopback only: the player (and the cast proxy) connect via 127.0.0.1, the LAN must not
+            serverSocket = ServerSocket(port, 50, java.net.InetAddress.getLoopbackAddress())
             executor.submit {
                 while (isRunning) {
                     try {
@@ -177,15 +179,13 @@ class TorrentHttpServer(
                             "Content-Type: $contentType\r\n" +
                             "Content-Length: $contentSize\r\n" +
                             "Content-Range: bytes $startByte-$endByte/$fileSize\r\n" +
-                            "Connection: keep-alive\r\n" +
-                            "Access-Control-Allow-Origin: *\r\n\r\n"
+                            "Connection: keep-alive\r\n\r\n"
                 } else {
                     "HTTP/1.1 200 OK\r\n" +
                             "Accept-Ranges: bytes\r\n" +
                             "Content-Type: $contentType\r\n" +
                             "Content-Length: $fileSize\r\n" +
-                            "Connection: keep-alive\r\n" +
-                            "Access-Control-Allow-Origin: *\r\n\r\n"
+                            "Connection: keep-alive\r\n\r\n"
                 }
 
                 output.write(responseHeaders.toByteArray())

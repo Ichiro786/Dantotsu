@@ -1075,7 +1075,8 @@ class NativeVideoDownloader(private val context: Context) : DownloadAddonApiV2 {
     // aria2 SUBPROCESS MANAGEMENT
     // ==========================================
     private suspend fun ensureAria2Running(): Unit = aria2Mutex.withLock {
-        if (aria2Process != null) return
+        // restart aria2 if it died instead of falling back for the rest of the process' life
+        if (aria2Process?.isAlive == true) return
         rpcPort = findFreePort(6800)
         aria2Secret = UUID.randomUUID().toString()
         val binaryPath = "${context.applicationInfo.nativeLibraryDir}/libaria2c.so"

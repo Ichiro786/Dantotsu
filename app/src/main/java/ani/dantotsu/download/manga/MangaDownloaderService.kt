@@ -104,7 +104,7 @@ class MangaDownloaderService : Service() {
             this,
             cancelReceiver,
             IntentFilter(ACTION_CANCEL_DOWNLOAD),
-            ContextCompat.RECEIVER_EXPORTED
+            ContextCompat.RECEIVER_NOT_EXPORTED
         )
     }
 
@@ -218,20 +218,27 @@ class MangaDownloaderService : Service() {
         }
     }
 
-    fun cancelDownload(chapter: String) {
-        val tasks = MangaServiceDataSingleton.downloadQueue.filter { it.chapter == chapter || it.uniqueName == chapter }
+    fun cancelDownload(chapter: String, title: String? = null) {
+        // when the title is known only that manga's chapter is cancelled ("Chapter 5" used to
+        // cancel chapter 5 of every manga in the queue)
+        fun DownloadTask.matches() = (chapter == this.chapter || uniqueName == chapter) &&
+            (title == null || this.title == title)
+        val tasks = MangaServiceDataSingleton.downloadQueue.filter { it.matches() }
         tasks.forEach { task ->
             broadcastDownloadFailed(task.uniqueName)
             broadcastDownloadFailed(task.chapter)
         }
         serviceScope.launch {
             mutex.withLock {
-                val toCancel = downloadJobs.filter { it.key == chapter || it.key.endsWith("_$chapter") }
+                val toCancel = downloadJobs.filter {
+                    if (title != null) it.key == "${title}_$chapter"
+                    else it.key == chapter || it.key.endsWith("_$chapter")
+                }
                 toCancel.forEach { (k, j) ->
                     j.cancel()
                     downloadJobs.remove(k)
                 }
-                MangaServiceDataSingleton.downloadQueue.removeAll { it.chapter == chapter || it.uniqueName == chapter }
+                MangaServiceDataSingleton.downloadQueue.removeAll { it.matches() }
                 updateNotification()
             }
         }
@@ -498,21 +505,21 @@ class MangaDownloaderService : Service() {
         val intent = Intent(ACTION_DOWNLOAD_STARTED).apply {
             putExtra(EXTRA_CHAPTER_NUMBER, chapterNumber)
         }
-        sendBroadcast(intent)
+        sendAppBroadcast(intent)
     }
 
     private fun broadcastDownloadFinished(chapterNumber: String) {
         val intent = Intent(ACTION_DOWNLOAD_FINISHED).apply {
             putExtra(EXTRA_CHAPTER_NUMBER, chapterNumber)
         }
-        sendBroadcast(intent)
+        sendAppBroadcast(intent)
     }
 
     private fun broadcastDownloadFailed(chapterNumber: String) {
         val intent = Intent(ACTION_DOWNLOAD_FAILED).apply {
             putExtra(EXTRA_CHAPTER_NUMBER, chapterNumber)
         }
-        sendBroadcast(intent)
+        sendAppBroadcast(intent)
     }
 
     private fun broadcastDownloadProgress(
@@ -527,15 +534,19 @@ class MangaDownloaderService : Service() {
             putExtra(EXTRA_DOWNLOADED_BYTES, downloadedBytes)
             putExtra(EXTRA_ESTIMATED_TOTAL_BYTES, estimatedTotalBytes)
         }
-        sendBroadcast(intent)
+        sendAppBroadcast(intent)
     }
+
+    // explicit to our own package: other apps can neither spoof nor observe these
+    private fun sendAppBroadcast(intent: Intent) = sendBroadcast(intent.setPackage(packageName))
 
     private val cancelReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == ACTION_CANCEL_DOWNLOAD) {
                 val chapter = intent.getStringExtra(EXTRA_CHAPTER)
+                val title = intent.getStringExtra(EXTRA_TITLE)
                 chapter?.let {
-                    cancelDownload(it)
+                    cancelDownload(it, title)
                 }
             }
         }
@@ -557,8 +568,10 @@ class MangaDownloaderService : Service() {
 
     companion object {
         private const val NOTIFICATION_ID = 1103
-        const val ACTION_CANCEL_DOWNLOAD = "action_cancel_download"
+        // per-type, package-qualified action (all three services used to share one)
+        const val ACTION_CANCEL_DOWNLOAD = "ani.dantotsu.ACTION_CANCEL_MANGA_DOWNLOAD"
         const val EXTRA_CHAPTER = "extra_chapter"
+        const val EXTRA_TITLE = "extra_title"
     }
 }
 
