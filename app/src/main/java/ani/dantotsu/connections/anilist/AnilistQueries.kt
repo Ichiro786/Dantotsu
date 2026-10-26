@@ -64,26 +64,65 @@ class AnilistQueries {
         val cachedAt: Long
     ) : Serializable
 
+    // Home / user-status caches live in files under cacheDir instead of Base64 blobs in
+    // SharedPreferences (the whole prefs XML was rewritten on every save and flushed on the
+    // main thread in onPause/onStop).
+    private fun cacheFile(name: String): java.io.File? =
+        ani.dantotsu.App.instance?.cacheDir?.let { java.io.File(it, "anilist_$name.bin") }
+
+    @Volatile
+    private var legacyCacheCleared = false
+
+    private fun clearLegacyPrefCaches() {
+        if (legacyCacheCleared) return
+        legacyCacheCleared = true
+        if (!PrefManager.getCustomVal("anilist_file_cache_migrated", false)) {
+            PrefManager.setCustomVal("home_page_cache", null)
+            PrefManager.setCustomVal("user_status_cache", null)
+            PrefManager.setCustomVal("anilist_file_cache_migrated", true)
+        }
+    }
+
+    private fun <T> readCacheFile(name: String, clazz: Class<T>): T? {
+        val file = cacheFile(name) ?: return null
+        if (!file.exists()) return null
+        return try {
+            ObjectInputStream(file.inputStream().buffered()).use { clazz.cast(it.readObject()) }
+        } catch (e: Exception) {
+            file.delete()
+            null
+        }
+    }
+
+    private fun writeCacheFile(name: String, value: Serializable?) {
+        val file = cacheFile(name) ?: return
+        try {
+            if (value == null) {
+                file.delete()
+                return
+            }
+            val tmp = java.io.File(file.parentFile, file.name + ".tmp")
+            ObjectOutputStream(tmp.outputStream().buffered()).use { it.writeObject(value) }
+            tmp.renameTo(file)
+        } catch (e: Exception) {
+            Logger.log(e)
+        }
+        clearLegacyPrefCaches()
+    }
+
     fun loadHomePageCache(): Map<String, ArrayList<Media>>? {
-        val cached = PrefManager.getNullableCustomVal(
-            "home_page_cache",
-            null,
-            HomePageCache::class.java
-        ) ?: return null
+        val cached = readCacheFile("home_page_cache", HomePageCache::class.java) ?: return null
         val cacheExpired = System.currentTimeMillis() - cached.cachedAt > 3 * 60 * 60 * 1000L
         if (cacheExpired) return null
         return cached.data
     }
 
     fun saveHomePageCache(data: Map<String, ArrayList<Media>>) {
-        PrefManager.setCustomVal(
-            "home_page_cache",
-            HomePageCache(data, System.currentTimeMillis())
-        )
+        writeCacheFile("home_page_cache", HomePageCache(data, System.currentTimeMillis()))
     }
 
     fun invalidateHomePageCache() {
-        PrefManager.setCustomVal("home_page_cache", null)
+        writeCacheFile("home_page_cache", null)
     }
 
     suspend fun getUserData(): Boolean {
@@ -132,6 +171,10 @@ class AnilistQueries {
                 Anilist.mangaCustomLists = mangaList.customLists
             }
         }
+        // userid is only known from here on: the calls in loadMain were no-ops on a cold start.
+        // Both functions are single-flight, so overlapping calls don't double-submit.
+        ani.dantotsu.connections.syncPendingProgressUpdates()
+        ani.dantotsu.connections.syncPendingDeletions()
         return true
     }
 
@@ -505,7 +548,7 @@ class AnilistQueries {
             """{Media(id:${media.id}){id mediaListEntry{id status progress progressVolumes private repeat customLists updatedAt startedAt{year month day}completedAt{year month day}}isFavourite idMal}}"""
         runBlocking {
             val anilist = async {
-                var response = executeQuery<Query.Media>(query, force = true, show = true)
+                var response = executeQuery<Query.Media>(query, force = true)
                 if (response != null) {
                     fun parse() {
                         val fetchedMedia = response?.data?.media ?: return
@@ -686,7 +729,7 @@ class AnilistQueries {
             recRating: ${recommendationQuery("RATING_DESC", page, perPage)}
             recNew: ${recommendationQuery("ID_DESC", page, perPage)}
         }"""
-        val response = executeQuery<Query.RecommendationsResponse>(query, show = true)
+        val response = executeQuery<Query.RecommendationsResponse>(query)
         val subMap = mutableMapOf<Int, Media>()
 
         response?.data?.recRating?.recommendations?.forEach {
@@ -729,29 +772,27 @@ class AnilistQueries {
 
     private suspend fun fetchMissingSequelMedia(ids: Set<Int>): ArrayList<Media> {
         if (ids.isEmpty()) return arrayListOf()
-        val response = executeQuery<Query.Page>(missingSequelsLookupQuery(ids.toList()))
-        val mediaList = response?.data?.page?.media?.mapNotNull { media ->
-            if (media.mediaListEntry == null) Media(media) else null
-        } ?: emptyList()
-        return ArrayList(mediaList)
+        // the lookup page holds at most 50 results: query in chunks so sequels past the
+        // first 50 aren't silently dropped
+        val result = ArrayList<Media>()
+        for (chunk in ids.toList().chunked(batchSize)) {
+            val response = executeQuery<Query.Page>(missingSequelsLookupQuery(chunk))
+            response?.data?.page?.media?.mapNotNullTo(result) { media ->
+                if (media.mediaListEntry == null) Media(media) else null
+            }
+        }
+        return result
     }
 
     private fun loadUserStatusCache(): ArrayList<User>? {
-        val cached = PrefManager.getNullableCustomVal(
-            "user_status_cache",
-            null,
-            UserStatusCache::class.java
-        ) ?: return null
+        val cached = readCacheFile("user_status_cache", UserStatusCache::class.java) ?: return null
         val cacheExpired = System.currentTimeMillis() - cached.cachedAt > 15 * 60 * 1000L
         if (cacheExpired) return null
         return ArrayList(cached.users)
     }
 
     private fun saveUserStatusCache(users: ArrayList<User>) {
-        PrefManager.setCustomVal(
-            "user_status_cache",
-            UserStatusCache(users, System.currentTimeMillis())
-        )
+        writeCacheFile("user_status_cache", UserStatusCache(users, System.currentTimeMillis()))
     }
 
     private fun continueMediaQuery(type: String, status: String): String {
@@ -815,7 +856,7 @@ class AnilistQueries {
             null
         } else {
             val query = "{${queries.joinToString(",")}}"
-            executeQuery<Query.HomePageMedia>(query, show = true)
+            executeQuery<Query.HomePageMedia>(query)
         }
         if (queries.isNotEmpty() && response == null) {
             return emptyMap()
@@ -1887,8 +1928,7 @@ Page(page:$page,perPage:50) {
     suspend fun getUserStatistics(id: Int, sort: String = "ID"): Query.StatisticsResponse? {
         return executeQuery<Query.StatisticsResponse>(
             """{User(id:$id){id name mediaListOptions{scoreFormat}statistics{anime{...UserStatistics}manga{...UserStatistics}}}}fragment UserStatistics on UserStatistics{count meanScore standardDeviation minutesWatched episodesWatched chaptersRead volumesRead formats(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds format}statuses(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds status}scores(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds score}lengths(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds length}releaseYears(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds releaseYear}startYears(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds startYear}genres(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds genre}tags(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds tag{id name}}countries(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds country}voiceActors(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds voiceActor{id name{first middle last full native alternative userPreferred}}characterIds}staff(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds staff{id name{first middle last full native alternative userPreferred}}}studios(sort:$sort){count meanScore minutesWatched chaptersRead mediaIds studio{id name isAnimationStudio}}}""",
-            force = true,
-            show = true
+            force = true
         )
     }
 

@@ -49,8 +49,26 @@ class AnimePageAdapter : RecyclerView.Adapter<AnimePageAdapter.AnimePageViewHold
     val ready = MutableLiveData(false)
     lateinit var binding: ItemAnimePageBinding
     private lateinit var trendingBinding: LayoutTrendingBinding
-    private var trendHandler: Handler? = null
-    private lateinit var trendRun: Runnable
+    // One handler/runnable/callback for the auto-scroll; paused by the fragment in onPause /
+    // onDestroyView (it used to keep ticking in the background and leak the view).
+    private val trendHandler = Handler(Looper.getMainLooper())
+    private val trendRun = Runnable {
+        if (this::trendingBinding.isInitialized) trendingBinding.trendingViewPager.currentItem += 1
+    }
+    private var trendCallbackPager: ViewPager2? = null
+    private var trendPaused = false
+
+    fun pauseTrending() {
+        trendPaused = true
+        trendHandler.removeCallbacks(trendRun)
+    }
+
+    fun resumeTrending() {
+        trendPaused = false
+        trendHandler.removeCallbacks(trendRun)
+        if (trendCallbackPager != null && PrefManager.getVal(PrefName.TrendingScroller))
+            trendHandler.postDelayed(trendRun, 4000)
+    }
     var trendingViewPager: ViewPager2? = null
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): AnimePageViewHolder {
@@ -192,21 +210,20 @@ class AnimePageAdapter : RecyclerView.Adapter<AnimePageAdapter.AnimePageViewHold
         trendingBinding.trendingViewPager.getChildAt(0).overScrollMode =
             RecyclerView.OVER_SCROLL_NEVER
         trendingBinding.trendingViewPager.setPageTransformer(MediaPageTransformer())
-        trendHandler = Handler(Looper.getMainLooper())
-        trendRun = Runnable {
-            trendingBinding.trendingViewPager.currentItem += 1
-        }
-        trendingBinding.trendingViewPager.registerOnPageChangeCallback(
-            object : ViewPager2.OnPageChangeCallback() {
-                override fun onPageSelected(position: Int) {
-                    super.onPageSelected(position)
-                    trendHandler?.removeCallbacks(trendRun)
-                    if (PrefManager.getVal(PrefName.TrendingScroller)) {
-                        trendHandler!!.postDelayed(trendRun, 4000)
+        // register once per pager (it was added again on every season tap / refresh)
+        if (trendCallbackPager !== trendingBinding.trendingViewPager) {
+            trendCallbackPager = trendingBinding.trendingViewPager
+            trendingBinding.trendingViewPager.registerOnPageChangeCallback(
+                object : ViewPager2.OnPageChangeCallback() {
+                    override fun onPageSelected(position: Int) {
+                        super.onPageSelected(position)
+                        trendHandler.removeCallbacks(trendRun)
+                        if (!trendPaused && PrefManager.getVal(PrefName.TrendingScroller))
+                            trendHandler.postDelayed(trendRun, 4000)
                     }
                 }
-            }
-        )
+            )
+        }
 
         trendingBinding.trendingViewPager.layoutAnimation =
             LayoutAnimationController(setSlideIn(), 0.25f)

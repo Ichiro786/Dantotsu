@@ -77,7 +77,11 @@ class HomeFragment : Fragment() {
         return binding.root
     }
 
+    // one view pool shared by the horizontal media rows (same item views)
+    private var homeRowPool: RecyclerView.RecycledViewPool? = null
+
     override fun onDestroyView() {
+        homeRowPool = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             _binding?.homeScroll?.setOnScrollChangeListener(null as View.OnScrollChangeListener?)
         }
@@ -293,6 +297,9 @@ class HomeFragment : Fragment() {
             more.visibility = View.VISIBLE
             recyclerView.visibility = View.VISIBLE
 
+            recyclerView.setRecycledViewPool(
+                homeRowPool ?: RecyclerView.RecycledViewPool().also { homeRowPool = it }
+            )
             recyclerView.adapter = MediaAdaptor(0, getSkeletonMediaList(), requireActivity())
             recyclerView.layoutManager = LinearLayoutManager(
                 requireContext(),
@@ -305,8 +312,28 @@ class HomeFragment : Fragment() {
                     if (it.isNotEmpty()) {
                         empty.visibility = View.GONE
                         val currentAdapter = recyclerView.adapter as? MediaAdaptor
-                        if (currentAdapter != null && currentAdapter.type == 0 && currentAdapter.mediaList === it && recyclerView.tag == "loaded") {
+                        val currentList = currentAdapter?.mediaList
+                        if (currentAdapter != null && currentAdapter.type == 0 && currentList === it && recyclerView.tag == "loaded") {
                             currentAdapter.notifyDataSetChanged()
+                        } else if (currentAdapter != null && currentAdapter.type == 0 && currentList != null && recyclerView.tag == "loaded") {
+                            // fresh data for a row that is already shown: update in place with a
+                            // diff instead of a new adapter + layout manager + replayed animation
+                            val old = ArrayList(currentList)
+                            val diff = androidx.recyclerview.widget.DiffUtil.calculateDiff(
+                                object : androidx.recyclerview.widget.DiffUtil.Callback() {
+                                    override fun getOldListSize() = old.size
+                                    override fun getNewListSize() = it.size
+                                    override fun areItemsTheSame(o: Int, n: Int) = old[o].id == it[n].id
+                                    override fun areContentsTheSame(o: Int, n: Int) =
+                                        old[o].userProgress == it[n].userProgress &&
+                                            old[o].userStatus == it[n].userStatus &&
+                                            old[o].userScore == it[n].userScore &&
+                                            old[o].cover == it[n].cover
+                                }
+                            )
+                            currentList.clear()
+                            currentList.addAll(it)
+                            diff.dispatchUpdatesTo(currentAdapter)
                         } else {
                             recyclerView.tag = "loaded"
                             recyclerView.adapter = MediaAdaptor(0, it, requireActivity())

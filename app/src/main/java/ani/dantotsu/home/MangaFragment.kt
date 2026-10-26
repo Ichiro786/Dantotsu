@@ -58,7 +58,13 @@ class MangaFragment : Fragment() {
         return binding.root
     }
 
+    override fun onPause() {
+        if (this::mangaPageAdapter.isInitialized) mangaPageAdapter.pauseTrending()
+        super.onPause()
+    }
+
     override fun onDestroyView() {
+        if (this::mangaPageAdapter.isInitialized) mangaPageAdapter.pauseTrending()
         super.onDestroyView()
         Refresh.activity.remove(this.hashCode())
         _binding = null
@@ -315,6 +321,7 @@ class MangaFragment : Fragment() {
         }
         if (this::mangaPageAdapter.isInitialized && _binding != null) {
             mangaPageAdapter.updateNotificationCount()
+            mangaPageAdapter.resumeTrending()
         }
         super.onResume()
     }

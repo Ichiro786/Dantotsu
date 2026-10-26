@@ -816,8 +816,9 @@ fun String.findBetween(a: String, b: String): String? {
 
 fun ImageView.loadImage(url: String?, size: Int = 0) {
     if (!url.isNullOrEmpty()) {
-        val localFile = File(url)
-        if (localFile.exists()) {
+        // only paths can be local files: skip the stat() syscall for every https cover bind
+        val localFile = if (url.startsWith("/") || url.startsWith("file:")) File(url.removePrefix("file://")) else null
+        if (localFile != null && localFile.exists()) {
             loadLocalImage(localFile, size)
         } else {
             loadImage(FileUrl(url), size)
@@ -1349,9 +1350,15 @@ fun toast(res: Int) {
 }
 
 fun snackString(s: String?, activity: Activity? = null, clipboard: String? = null): Snackbar? {
-    try { //I have no idea why this sometimes crashes for some people...
+    // Snackbar.make inflates views and reads the hierarchy: it must run on the main thread.
+    // Callers on background threads (network errors) used to build it there and crash.
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+        if (s != null) Handler(Looper.getMainLooper()).post { snackString(s, activity, clipboard) }
+        return null
+    }
+    try {
         if (s != null) {
-            (activity ?: currActivity())?.apply {
+            (activity ?: currActivity())?.takeIf { !it.isFinishing && !it.isDestroyed }?.apply {
                 val snackBar = Snackbar.make(
                     window.decorView.findViewById(android.R.id.content),
                     s,

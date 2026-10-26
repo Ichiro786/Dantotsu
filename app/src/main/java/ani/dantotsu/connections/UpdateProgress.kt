@@ -108,6 +108,9 @@ fun updateProgress(media: Media, number: String) {
     }
 }
 
+private val progressSyncRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+private val deletionSyncRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
 /** Sync all pending progress updates (cached during rescue mode) to AniList. */
 fun syncPendingProgressUpdates() {
 
@@ -120,8 +123,10 @@ fun syncPendingProgressUpdates() {
         return
     }
     if (pending.isEmpty()) return
+    if (!progressSyncRunning.compareAndSet(false, true)) return
     toast(currContext()?.getString(R.string.syncing_progress, pending.size))
     CoroutineScope(Dispatchers.IO).launch {
+      try {
         val remaining = pending.toMutableList()
         for (update in pending) {
             try {
@@ -165,6 +170,9 @@ fun syncPendingProgressUpdates() {
             toast(currContext()?.getString(R.string.sync_partial, remaining.size))
         }
         Refresh.all()
+      } finally {
+        progressSyncRunning.set(false)
+      }
     }
 }
 
@@ -179,8 +187,10 @@ fun syncPendingDeletions() {
         return
     }
     if (pending.isEmpty()) return
+    if (!deletionSyncRunning.compareAndSet(false, true)) return
     toast(currContext()?.getString(R.string.syncing_deletions, pending.size))
     CoroutineScope(Dispatchers.IO).launch {
+      try {
         val remaining = pending.toMutableList()
         for (deletion in pending) {
             if (Anilist.anilistDisabledSignal) break
@@ -227,5 +237,8 @@ fun syncPendingDeletions() {
         }
 
         Refresh.all()
+      } finally {
+        deletionSyncRunning.set(false)
+      }
     }
 }

@@ -378,7 +378,7 @@ object Anilist {
                     cacheTime = if (force) 0 else (cache ?: 10)
                 )
                 val remaining = json.headers["X-RateLimit-Remaining"]?.toIntOrNull() ?: -1
-                Logger.log("Remaining requests: $remaining")
+                if (remaining in 0..9) Logger.log("Remaining requests: $remaining")
                 if (json.code == 429) {
                     val currentSec = System.currentTimeMillis() / 1000
                     val retry = json.headers["Retry-After"]?.toIntOrNull() ?: -1

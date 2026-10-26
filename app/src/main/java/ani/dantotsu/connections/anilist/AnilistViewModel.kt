@@ -170,8 +170,11 @@ class AnilistHomeViewModel : ViewModel() {
                         val freshRes = Anilist.query.initHomePage()
                         if (freshRes.isNotEmpty()) {
                             Anilist.query.saveHomePageCache(freshRes)
-                            withContext(Dispatchers.Main) {
-                                postHomePageData(freshRes)
+                            // only re-post (and rebuild every carousel) when something visible changed
+                            if (homeSignature(freshRes) != homeSignature(cachedRes)) {
+                                withContext(Dispatchers.Main) {
+                                    postHomePageData(freshRes)
+                                }
                             }
                         }
                     } catch (_: Exception) {
@@ -186,6 +189,9 @@ class AnilistHomeViewModel : ViewModel() {
             postHomePageData(res)
         }
     }
+
+    private fun homeSignature(res: Map<String, ArrayList<Media>>): Map<String, List<Pair<Int, Int?>>> =
+        res.mapValues { (_, list) -> list.map { it.id to it.userProgress } }
 
     private fun postHomePageData(res: Map<String, ArrayList<Media>>) {
         res["currentAnime"]?.let { animeContinue.postValue(it) }
@@ -369,6 +375,8 @@ class AnilistHomeViewModel : ViewModel() {
     val empty = MutableLiveData<Boolean>(null)
 
     var loaded: Boolean = false
+    // MainActivity ran loadMain for this ViewModel (survives configuration changes)
+    var mainLoaded: Boolean = false
     val genres: MutableLiveData<Boolean?> = MutableLiveData(null)
 }
 

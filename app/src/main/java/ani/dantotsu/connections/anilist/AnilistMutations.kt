@@ -271,7 +271,7 @@ class AnilistMutations {
             ${if (advancedScores != null) ""","advancedScores":[${advancedScores.joinToString(",")}]""" else ""}
             }""".replace("\n", "").replace("""    """, "")
         println(variables)
-        executeQuery<JsonObject>(query, variables, show = true)
+        executeQuery<JsonObject>(query, variables)
         Anilist.query.invalidateUserStatusCache()
         Anilist.query.invalidateHomePageCache()
     }

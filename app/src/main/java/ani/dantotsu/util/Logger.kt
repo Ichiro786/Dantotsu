@@ -48,13 +48,14 @@ object Logger {
     }
 
     fun log(message: String) {
-        val trace = Thread.currentThread().stackTrace[3]
+        // capturing a stack trace is expensive: only do it when file logging is on
+        val trace = if (file != null) Thread.currentThread().stackTrace[3] else null
         loggerExecutor.execute {
             if (file == null) Log.d("Internal Logger", message)
             else {
-                val className = trace.className
-                val methodName = trace.methodName
-                val lineNumber = trace.lineNumber
+                val className = trace?.className
+                val methodName = trace?.methodName
+                val lineNumber = trace?.lineNumber
                 file?.appendText("date/time: ${Date()} | $className.$methodName($lineNumber)\n")
                 file?.appendText("message: $message\n-\n")
             }
@@ -62,13 +63,13 @@ object Logger {
     }
 
     fun log(level: Int, message: String, tag: String = "Internal Logger") {
-        val trace = Thread.currentThread().stackTrace[3]
+        val trace = if (file != null) Thread.currentThread().stackTrace[3] else null
         loggerExecutor.execute {
             if (file == null) Log.println(level, tag, message)
             else {
-                val className = trace.className
-                val methodName = trace.methodName
-                val lineNumber = trace.lineNumber
+                val className = trace?.className
+                val methodName = trace?.methodName
+                val lineNumber = trace?.lineNumber
                 file?.appendText("date/time: ${Date()} | $className.$methodName($lineNumber)\n")
                 file?.appendText("message: $message\n-\n")
             }

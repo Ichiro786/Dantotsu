@@ -61,7 +61,7 @@ class SettingsCommonActivity : AppCompatActivity() {
                 if (uri != null) {
                     try {
                         val jsonString =
-                            contentResolver.openInputStream(uri)?.readBytes()
+                            contentResolver.openInputStream(uri)?.use { it.readBytes() } // closed (fd leak)
                                 ?: throw Exception("Error reading file")
                         val name = DocumentFile.fromSingleUri(this, uri)?.name ?: "settings"
                         // .sani is encrypted, .ani is not

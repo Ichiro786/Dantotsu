@@ -63,7 +63,13 @@ class AnimeFragment : Fragment() {
         return binding.root
     }
 
+    override fun onPause() {
+        if (this::animePageAdapter.isInitialized) animePageAdapter.pauseTrending()
+        super.onPause()
+    }
+
     override fun onDestroyView() {
+        if (this::animePageAdapter.isInitialized) animePageAdapter.pauseTrending()
         super.onDestroyView()
         Refresh.activity.remove(this.hashCode())
         _binding = null
@@ -331,6 +337,7 @@ class AnimeFragment : Fragment() {
         }
         if (this::animePageAdapter.isInitialized && _binding != null) {
             animePageAdapter.updateNotificationCount()
+            animePageAdapter.resumeTrending()
         }
         super.onResume()
     }

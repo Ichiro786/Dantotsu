@@ -106,21 +106,45 @@ class MediaDetailsActivity : AppCompatActivity(), AppBarLayout.OnOffsetChangedLi
             ?: savedId
             ?: -1
         if (id != -1 && media.name == "No media found") {
+            // Fetch off the main thread (this used runBlocking in onCreate -> frozen screen / ANR),
+            // show a spinner meanwhile, then recreate with the media in the intent.
             val rescueMode: Boolean = PrefManager.getVal(PrefName.RescueMode)
-            runBlocking(Dispatchers.IO) {
-                if (rescueMode) {
-                    val animeNode = MAL.query.getAnimeDetails(id)
-                    if (animeNode != null) {
-                        media = Media(animeNode, true)
-                    } else {
-                        val mangaNode = MAL.query.getMangaDetails(id)
-                        media = if (mangaNode != null) Media(mangaNode, false)
-                        else emptyMedia()
+            ThemeManager(this).applyTheme()
+            setContentView(android.widget.FrameLayout(this).apply {
+                addView(
+                    android.widget.ProgressBar(this@MediaDetailsActivity),
+                    android.widget.FrameLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                        android.view.Gravity.CENTER
+                    )
+                )
+            })
+            lifecycleScope.launch {
+                val loaded = withContext(Dispatchers.IO) {
+                    try {
+                        if (rescueMode) {
+                            MAL.query.getAnimeDetails(id)?.let { Media(it, true) }
+                                ?: MAL.query.getMangaDetails(id)?.let { Media(it, false) }
+                        } else {
+                            Anilist.query.getMedia(id, false)
+                        }
+                    } catch (e: Exception) {
+                        ani.dantotsu.util.Logger.log(e)
+                        null
                     }
-                } else {
-                    media = Anilist.query.getMedia(id, false) ?: emptyMedia()
                 }
+                if (isFinishing || isDestroyed) return@launch
+                if (loaded == null) {
+                    snackString("No media found")
+                    finish()
+                    return@launch
+                }
+                intent.putExtra("media", loaded as java.io.Serializable)
+                intent.putExtra("mediaId", loaded.id)
+                recreate()
             }
+            return
         }
         this.media = media
         if (media.name == "No media found") {

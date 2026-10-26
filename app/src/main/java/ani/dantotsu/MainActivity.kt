@@ -99,6 +99,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         ThemeManager(this).applyTheme()
+        // Read the saved AniList token before the pager adapter decides Home vs Login. It used to
+        // be loaded only inside an IO coroutine in loadMain (skipped for deep links / offline).
+        Anilist.getSavedToken()
+        // A recreated activity (rotation, theme change, process restore) must not handle its
+        // launch intent again (re-import settings, re-open screens) or re-queue workers.
+        val firstCreate = savedInstanceState == null
 
         //get FRAGMENT_CLASS_NAME from intent
         val fragment = intent.getStringExtra("FRAGMENT_CLASS_NAME")
@@ -120,9 +126,11 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         }
-        TaskScheduler.scheduleSingleWork(this)
+        if (firstCreate) {
+            TaskScheduler.scheduleSingleWork(this)
+        }
 
-        if (Intent.ACTION_VIEW == intent.action) {
+        if (firstCreate && Intent.ACTION_VIEW == intent.action) {
             handleViewIntent(intent)
         }
 
@@ -354,7 +362,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         var launched = false
-        intent.extras?.let { extras ->
+        intent.extras?.takeIf { firstCreate }?.let { extras ->
             val fragmentToLoad = extras.getString("FRAGMENT_TO_LOAD")
             val mediaId = extras.getInt("mediaId", -1)
             val commentId = extras.getInt("commentId", -1)
@@ -399,8 +407,9 @@ class MainActivity : AppCompatActivity() {
             } else {
                 val model: AnilistHomeViewModel by viewModels()
 
-                //Load Data
-                if (!load && !launched) {
+                //Load Data (once per ViewModel, i.e. not again after a rotation)
+                if (!model.mainLoaded && !load && !launched) {
+                    model.mainLoaded = true
                     scope.launch(Dispatchers.IO) {
                         model.loadMain(this@MainActivity)
                         val id = intent.extras?.getInt("mediaId", 0)?.takeIf { it != 0 }
@@ -544,7 +553,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (intent.type == null) return
             val jsonString =
-                contentResolver.openInputStream(uri)?.readBytes()
+                contentResolver.openInputStream(uri)?.use { it.readBytes() } // closed (fd leak)
                     ?: throw Exception("Error reading file")
             val name =
                 DocumentFile.fromSingleUri(this, uri)?.name ?: "settings"
