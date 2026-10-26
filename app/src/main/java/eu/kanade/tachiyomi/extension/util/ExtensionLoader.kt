@@ -10,6 +10,8 @@ import ani.dantotsu.media.MediaType
 import ani.dantotsu.parsers.NovelInterface
 import ani.dantotsu.parsers.novel.NovelExtension
 import ani.dantotsu.parsers.novel.NovelLoadResult
+import ani.dantotsu.settings.saving.PrefManager
+import ani.dantotsu.settings.saving.PrefName
 import ani.dantotsu.util.Logger
 import dalvik.system.PathClassLoader
 import eu.kanade.domain.source.service.SourcePreferences
@@ -54,14 +56,9 @@ import java.io.File
 internal object ExtensionLoader {
 
     private fun isNsfwAllowed(context: Context): Boolean {
+        // Read the same preference the "NSFW Extensions" toggle in Settings > Extensions writes.
         return try {
-            val app = context.applicationContext
-            if (app is GraphProvider<*>) {
-                (app.graph as? AppGraph)?.let {
-                    return it.sourcePreferences.showNsfwSource().get()
-                }
-            }
-            Injekt.get<SourcePreferences>().showNsfwSource().get()
+            PrefManager.getVal<Boolean>(PrefName.NSFWExtension)
         } catch (_: Throwable) {
             true
         }
@@ -72,7 +69,7 @@ internal object ExtensionLoader {
 
     private const val XX_METADATA_SOURCE_CLASS = ".class"
     private const val XX_METADATA_SOURCE_FACTORY = ".factory"
-    private const val XX_METADATA_NSFW = "n.nsfw"
+    private const val XX_METADATA_NSFW = ".nsfw"
     private const val XX_METADATA_HAS_README = ".hasReadme"
     private const val XX_METADATA_HAS_CHANGELOG = ".hasChangelog"
     const val ANIME_LIB_VERSION_MIN = 14
@@ -87,9 +84,52 @@ internal object ExtensionLoader {
             (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
                 PackageManager.GET_SIGNING_CERTIFICATES else 0)
 
-    fun getPackageArchiveInfoSafe(pkgManager: PackageManager, apkPath: String): PackageInfo? {
+    /**
+     * Flags used when scanning for extensions to load. Signatures are not needed for loading
+     * (they are only checked when installing a private extension), and requesting them makes the
+     * system verify/marshal the certificates of every package on the device.
+     */
+    private const val LOAD_PACKAGE_FLAGS = PackageManager.GET_CONFIGURATIONS or
+            PackageManager.GET_META_DATA
+
+    private const val INSTALLED_PACKAGES_CACHE_MS = 3_000L
+    private var installedPackagesCache: List<PackageInfo>? = null
+    private var installedPackagesCacheTime = 0L
+
+    /**
+     * Returns the installed packages queried with [LOAD_PACKAGE_FLAGS]. The anime, manga and novel
+     * managers all scan at cold start at the same time, so a very short lived snapshot lets them
+     * share a single query instead of each asking the system for every installed package.
+     */
+    @Synchronized
+    private fun getInstalledPackagesSnapshot(pkgManager: PackageManager): List<PackageInfo> {
+        val now = android.os.SystemClock.elapsedRealtime()
+        installedPackagesCache?.let {
+            if (now - installedPackagesCacheTime < INSTALLED_PACKAGES_CACHE_MS) return it
+        }
+        val installedPkgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pkgManager.getInstalledPackages(PackageManager.PackageInfoFlags.of(LOAD_PACKAGE_FLAGS.toLong()))
+        } else {
+            pkgManager.getInstalledPackages(LOAD_PACKAGE_FLAGS)
+        }
+        installedPackagesCache = installedPkgs
+        installedPackagesCacheTime = now
+        return installedPkgs
+    }
+
+    /** Drops the installed packages snapshot, e.g. after a package was installed or removed. */
+    @Synchronized
+    fun invalidateInstalledPackagesSnapshot() {
+        installedPackagesCache = null
+    }
+
+    fun getPackageArchiveInfoSafe(
+        pkgManager: PackageManager,
+        apkPath: String,
+        flags: Int = PACKAGE_FLAGS,
+    ): PackageInfo? {
         return try {
-            pkgManager.getPackageArchiveInfo(apkPath, PACKAGE_FLAGS)
+            pkgManager.getPackageArchiveInfo(apkPath, flags)
         } catch (e: Exception) {
             null
         } ?: try {
@@ -207,12 +247,45 @@ internal object ExtensionLoader {
             ?.toList()
     }
 
+    /**
+     * Points the [ApplicationInfo] at the private extension file, so the class loader, metadata and
+     * resources come from the private copy and not from an installed (shared) package with the same name.
+     */
     private fun ApplicationInfo.fixBasePaths(apkPath: String) {
-        if (sourceDir == null) {
-            sourceDir = apkPath
-        }
-        if (publicSourceDir == null) {
-            publicSourceDir = apkPath
+        sourceDir = apkPath
+        publicSourceDir = apkPath
+    }
+
+    /**
+     * Collects the installed (shared) and private extensions of the given [type], choosing one
+     * package per package name. Private extension files are parsed exactly once.
+     */
+    private fun getExtensionInfos(context: Context, type: MediaType): List<ExtensionInfo> {
+        val pkgManager = context.packageManager
+
+        val sharedExtPkgs = getInstalledPackagesSnapshot(pkgManager)
+            .filter { isPackageAnExtension(type, it) }
+            .map { ExtensionInfo(packageInfo = it, isShared = true) }
+            .associateBy { it.packageInfo.packageName }
+
+        val privateExtPkgs = getPrivateExtensionDir(context)
+            .listFiles()
+            .orEmpty()
+            .filter { it.isFile && it.extension == PRIVATE_EXTENSION_EXTENSION }
+            .mapNotNull {
+                if (it.canWrite()) {
+                    it.setReadOnly()
+                }
+                val path = it.absolutePath
+                getPackageArchiveInfoSafe(pkgManager, path, LOAD_PACKAGE_FLAGS)
+                    ?.apply { applicationInfo?.fixBasePaths(path) }
+            }
+            .filter { isPackageAnExtension(type, it) }
+            .map { ExtensionInfo(packageInfo = it, isShared = false) }
+            .associateBy { it.packageInfo.packageName }
+
+        return (sharedExtPkgs.keys + privateExtPkgs.keys).mapNotNull { pkgName ->
+            selectExtensionPackage(sharedExtPkgs[pkgName], privateExtPkgs[pkgName])
         }
     }
 
@@ -258,43 +331,7 @@ internal object ExtensionLoader {
      * @param context The application context.
      */
     fun loadAnimeExtensions(context: Context): List<AnimeLoadResult> {
-        val pkgManager = context.packageManager
-
-        val installedPkgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pkgManager.getInstalledPackages(PackageManager.PackageInfoFlags.of(PACKAGE_FLAGS.toLong()))
-        } else {
-            pkgManager.getInstalledPackages(PACKAGE_FLAGS)
-        }
-
-        val sharedExtPkgs = installedPkgs
-            .asSequence()
-            .filter { isPackageAnExtension(MediaType.ANIME, it) }
-            .map { ExtensionInfo(packageInfo = it, isShared = true) }
-
-        val privateExtPkgs = getPrivateExtensionDir(context)
-            .listFiles()
-            ?.asSequence()
-            ?.filter { it.isFile && it.extension == PRIVATE_EXTENSION_EXTENSION }
-            ?.mapNotNull {
-                if (it.canWrite()) {
-                    it.setReadOnly()
-                }
-                val path = it.absolutePath
-                pkgManager.getPackageArchiveInfo(path, PACKAGE_FLAGS)
-                    ?.apply { applicationInfo!!.fixBasePaths(path) }
-            }
-            ?.filter { isPackageAnExtension(MediaType.ANIME, it) }
-            ?.map { ExtensionInfo(packageInfo = it, isShared = false) }
-            ?: emptySequence()
-
-        val extPkgs = (sharedExtPkgs + privateExtPkgs)
-            .distinctBy { it.packageInfo.packageName }
-            .mapNotNull { sharedPkg ->
-                val privatePkg = privateExtPkgs
-                    .singleOrNull { it.packageInfo.packageName == sharedPkg.packageInfo.packageName }
-                selectExtensionPackage(sharedPkg, privatePkg)
-            }
-            .toList()
+        val extPkgs = getExtensionInfos(context, MediaType.ANIME)
 
         if (extPkgs.isEmpty()) return emptyList()
 
@@ -308,43 +345,7 @@ internal object ExtensionLoader {
     }
 
     fun loadMangaExtensions(context: Context): List<MangaLoadResult> {
-        val pkgManager = context.packageManager
-
-        val installedPkgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pkgManager.getInstalledPackages(PackageManager.PackageInfoFlags.of(PACKAGE_FLAGS.toLong()))
-        } else {
-            pkgManager.getInstalledPackages(PACKAGE_FLAGS)
-        }
-
-        val sharedExtPkgs = installedPkgs
-            .asSequence()
-            .filter { isPackageAnExtension(MediaType.MANGA, it) }
-            .map { ExtensionInfo(packageInfo = it, isShared = true) }
-
-        val privateExtPkgs = getPrivateExtensionDir(context)
-            .listFiles()
-            ?.asSequence()
-            ?.filter { it.isFile && it.extension == PRIVATE_EXTENSION_EXTENSION }
-            ?.mapNotNull {
-                if (it.canWrite()) {
-                    it.setReadOnly()
-                }
-                val path = it.absolutePath
-                getPackageArchiveInfoSafe(pkgManager, path)
-                    ?.apply { applicationInfo?.fixBasePaths(path) }
-            }
-            ?.filter { isPackageAnExtension(MediaType.MANGA, it) }
-            ?.map { ExtensionInfo(packageInfo = it, isShared = false) }
-            ?: emptySequence()
-
-        val extPkgs = (sharedExtPkgs + privateExtPkgs)
-            .distinctBy { it.packageInfo.packageName }
-            .mapNotNull { sharedPkg ->
-                val privatePkg = privateExtPkgs
-                    .singleOrNull { it.packageInfo.packageName == sharedPkg.packageInfo.packageName }
-                selectExtensionPackage(sharedPkg, privatePkg)
-            }
-            .toList()
+        val extPkgs = getExtensionInfos(context, MediaType.MANGA)
 
         if (extPkgs.isEmpty()) return emptyList()
 
@@ -358,43 +359,7 @@ internal object ExtensionLoader {
     }
 
     fun loadNovelExtensions(context: Context): List<NovelLoadResult> {
-        val pkgManager = context.packageManager
-
-        val installedPkgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pkgManager.getInstalledPackages(PackageManager.PackageInfoFlags.of(PACKAGE_FLAGS.toLong()))
-        } else {
-            pkgManager.getInstalledPackages(PACKAGE_FLAGS)
-        }
-
-        val sharedExtPkgs = installedPkgs
-            .asSequence()
-            .filter { isPackageAnExtension(MediaType.NOVEL, it) }
-            .map { ExtensionInfo(packageInfo = it, isShared = true) }
-
-        val privateExtPkgs = getPrivateExtensionDir(context)
-            .listFiles()
-            ?.asSequence()
-            ?.filter { it.isFile && it.extension == PRIVATE_EXTENSION_EXTENSION }
-            ?.mapNotNull {
-                if (it.canWrite()) {
-                    it.setReadOnly()
-                }
-                val path = it.absolutePath
-                getPackageArchiveInfoSafe(pkgManager, path)
-                    ?.apply { applicationInfo?.fixBasePaths(path) }
-            }
-            ?.filter { isPackageAnExtension(MediaType.NOVEL, it) }
-            ?.map { ExtensionInfo(packageInfo = it, isShared = false) }
-            ?: emptySequence()
-
-        val extPkgs = (sharedExtPkgs + privateExtPkgs)
-            .distinctBy { it.packageInfo.packageName }
-            .mapNotNull { sharedPkg ->
-                val privatePkg = privateExtPkgs
-                    .singleOrNull { it.packageInfo.packageName == sharedPkg.packageInfo.packageName }
-                selectExtensionPackage(sharedPkg, privatePkg)
-            }
-            .toList()
+        val extPkgs = getExtensionInfos(context, MediaType.NOVEL)
 
         if (extPkgs.isEmpty()) return emptyList()
 
@@ -442,9 +407,15 @@ internal object ExtensionLoader {
         val pkgName = pkgInfo.packageName
         val pkgManager = context.packageManager
 
-        val appInfo = (try {
-            pkgManager.getApplicationInfo(pkgName, PackageManager.GET_META_DATA)
-        } catch (e: Exception) {
+        // Use the ApplicationInfo of the selected package. Querying the package manager by name would
+        // return the installed (shared) app even when a newer private copy was selected.
+        val appInfo = (if (extensionInfo.isShared && pkgInfo.applicationInfo?.metaData == null) {
+            try {
+                pkgManager.getApplicationInfo(pkgName, PackageManager.GET_META_DATA)
+            } catch (e: Exception) {
+                pkgInfo.applicationInfo
+            }
+        } else {
             pkgInfo.applicationInfo
         }) ?: return AnimeLoadResult.Error
 

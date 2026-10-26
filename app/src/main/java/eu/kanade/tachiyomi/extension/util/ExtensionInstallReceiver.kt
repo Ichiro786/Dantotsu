@@ -68,6 +68,7 @@ internal class ExtensionInstallReceiver : BroadcastReceiver() {
     @OptIn(DelicateCoroutinesApi::class)
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent == null) return
+        ExtensionLoader.invalidateInstalledPackagesSnapshot()
         when (intent.action) {
             Intent.ACTION_PACKAGE_ADDED, ACTION_EXTENSION_ADDED -> {
                 if (isReplacing(intent) && intent.action == Intent.ACTION_PACKAGE_ADDED) return

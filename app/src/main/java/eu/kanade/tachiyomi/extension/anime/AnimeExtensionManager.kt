@@ -22,6 +22,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import rx.Observable
 import tachiyomi.core.util.lang.launchNow
@@ -149,6 +150,9 @@ class AnimeExtensionManager(
 
         enableAdditionalSubLanguages(extensions)
 
+        // The update statuses are applied to the installed list, so wait until it has been loaded.
+        awaitInitialized()
+
         _availableAnimeExtensionsFlow.value = extensions
         updatedInstalledAnimeExtensionsStatuses(extensions)
         setupAvailableAnimeExtensionsSourcesDataMap(extensions)
@@ -195,43 +199,50 @@ class AnimeExtensionManager(
             return
         }
 
-        val mutInstalledAnimeExtensions = _installedAnimeExtensionsFlow.value.toMutableList()
-        var changed = false
+        val reposToSave = mutableMapOf<String, Pair<String, String?>>()
+        _installedAnimeExtensionsFlow.update { installed ->
+            reposToSave.clear()
+            installed.map { installedExt ->
+                val pkgName = installedExt.pkgName
+                val availableExt = availableAnimeExtensions.find { it.pkgName == pkgName }
 
-        for ((index, installedExt) in mutInstalledAnimeExtensions.withIndex()) {
-            val pkgName = installedExt.pkgName
-            val availableExt = availableAnimeExtensions.find { it.pkgName == pkgName }
+                if (!installedExt.isUnofficial && availableExt == null && !installedExt.isObsolete) {
+                    installedExt.copy(isObsolete = true)
+                } else if (availableExt != null) {
+                    val hasUpdate = installedExt.updateExists(availableExt)
+                    val newRepo = availableExt.repository
+                    val newRepoName = availableExt.repoName
 
-            if (!installedExt.isUnofficial && availableExt == null && !installedExt.isObsolete) {
-                mutInstalledAnimeExtensions[index] = installedExt.copy(isObsolete = true)
-                changed = true
-            } else if (availableExt != null) {
-                val hasUpdate = installedExt.updateExists(availableExt)
-                val newRepo = availableExt.repository
-                val newRepoName = availableExt.repoName
-
-                if (installedExt.hasUpdate != hasUpdate ||
-                    installedExt.repository != newRepo ||
-                    installedExt.repoName != newRepoName ||
-                    installedExt.isUnofficial
-                ) {
-                    mutInstalledAnimeExtensions[index] = installedExt.copy(
-                        hasUpdate = hasUpdate,
-                        isUnofficial = false,
-                        repository = newRepo,
-                        repoName = newRepoName,
-                    )
-                    changed = true
-                    ani.dantotsu.parsers.ExtensionRepoMetaHelper.saveInstalledExtensionRepo(
-                        pkgName,
-                        newRepo,
-                        newRepoName
-                    )
+                    // Only persist the repo when it actually changed; isUnofficial is always true
+                    // right after loading, so it alone must not trigger a prefs write.
+                    if (installedExt.repository != newRepo || installedExt.repoName != newRepoName) {
+                        reposToSave[pkgName] = newRepo to newRepoName
+                    }
+                    if (installedExt.hasUpdate != hasUpdate ||
+                        installedExt.repository != newRepo ||
+                        installedExt.repoName != newRepoName ||
+                        installedExt.isUnofficial
+                    ) {
+                        installedExt.copy(
+                            hasUpdate = hasUpdate,
+                            isUnofficial = false,
+                            repository = newRepo,
+                            repoName = newRepoName,
+                        )
+                    } else {
+                        installedExt
+                    }
+                } else {
+                    installedExt
                 }
             }
         }
-        if (changed) {
-            _installedAnimeExtensionsFlow.value = mutInstalledAnimeExtensions
+        reposToSave.forEach { (pkgName, repo) ->
+            ani.dantotsu.parsers.ExtensionRepoMetaHelper.saveInstalledExtensionRepo(
+                pkgName,
+                repo.first,
+                repo.second
+            )
         }
         updatePendingUpdatesCount()
     }
@@ -301,7 +312,7 @@ class AnimeExtensionManager(
      * @param extension The anime extension to be registered.
      */
     private fun registerNewExtension(extension: AnimeExtension.Installed) {
-        _installedAnimeExtensionsFlow.value += extension
+        _installedAnimeExtensionsFlow.update { it + extension }
     }
 
     /**
@@ -311,14 +322,16 @@ class AnimeExtensionManager(
      * @param extension The anime extension to be registered.
      */
     private fun registerUpdatedExtension(extension: AnimeExtension.Installed) {
-        val mutInstalledAnimeExtensions = _installedAnimeExtensionsFlow.value.toMutableList()
-        val index = mutInstalledAnimeExtensions.indexOfFirst { it.pkgName == extension.pkgName }
-        if (index != -1) {
-            mutInstalledAnimeExtensions[index] = extension
-        } else {
-            mutInstalledAnimeExtensions.add(extension)
+        _installedAnimeExtensionsFlow.update { installed ->
+            val mutInstalledAnimeExtensions = installed.toMutableList()
+            val index = mutInstalledAnimeExtensions.indexOfFirst { it.pkgName == extension.pkgName }
+            if (index != -1) {
+                mutInstalledAnimeExtensions[index] = extension
+            } else {
+                mutInstalledAnimeExtensions.add(extension)
+            }
+            mutInstalledAnimeExtensions
         }
-        _installedAnimeExtensionsFlow.value = mutInstalledAnimeExtensions
     }
 
     /**
@@ -328,16 +341,8 @@ class AnimeExtensionManager(
      * @param pkgName The package name of the uninstalled application.
      */
     private fun unregisterAnimeExtension(pkgName: String) {
-        val installedAnimeExtension =
-            _installedAnimeExtensionsFlow.value.find { it.pkgName == pkgName }
-        if (installedAnimeExtension != null) {
-            _installedAnimeExtensionsFlow.value -= installedAnimeExtension
-        }
-        val untrustedAnimeExtension =
-            _untrustedAnimeExtensionsFlow.value.find { it.pkgName == pkgName }
-        if (untrustedAnimeExtension != null) {
-            _untrustedAnimeExtensionsFlow.value -= untrustedAnimeExtension
-        }
+        _installedAnimeExtensionsFlow.update { installed -> installed.filterNot { it.pkgName == pkgName } }
+        _untrustedAnimeExtensionsFlow.update { untrusted -> untrusted.filterNot { it.pkgName == pkgName } }
     }
 
     /**
@@ -356,7 +361,7 @@ class AnimeExtensionManager(
         }
 
         override fun onExtensionUntrusted(extension: AnimeExtension.Untrusted) {
-            _untrustedAnimeExtensionsFlow.value += extension
+            _untrustedAnimeExtensionsFlow.update { it + extension }
         }
 
         override fun onPackageUninstalled(pkgName: String) {

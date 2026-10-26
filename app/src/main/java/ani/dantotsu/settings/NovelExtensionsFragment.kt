@@ -76,8 +76,10 @@ class NovelExtensionsFragment : Fragment(),
     }
 
     override fun notifyDataChanged() {
-        novelExtensionManager.danNovelManager.refreshInstalledExtensions()
-        viewModel.invalidatePager()
+        lifecycleScope.launch {
+            novelExtensionManager.danNovelManager.refreshInstalledExtensions()
+            viewModel.invalidatePager()
+        }
     }
 
     override fun onInstallClick(pkg: NovelExtension.Available) {
@@ -141,8 +143,10 @@ class NovelExtensionsFragment : Fragment(),
                             .setContentText("The extension has been successfully installed.")
                             .setPriority(NotificationCompat.PRIORITY_LOW)
                         notificationManager.notify(1, builder.build())
-                        novelExtensionManager.danNovelManager.refreshInstalledExtensions()
-                        viewModel.invalidatePager()
+                        lifecycleScope.launch {
+                            novelExtensionManager.danNovelManager.refreshInstalledExtensions()
+                            viewModel.invalidatePager()
+                        }
                         snackString("Extension installed")
                     }
                 )

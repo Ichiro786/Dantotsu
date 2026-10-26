@@ -39,11 +39,14 @@ class AddonLoader {
         ): LoadResult? {
             val pkgManager = context.packageManager
 
-            val installedPkgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                pkgManager.getInstalledPackages(PackageManager.PackageInfoFlags.of(ExtensionLoader.PACKAGE_FLAGS.toLong()))
-            } else {
-                pkgManager.getInstalledPackages(ExtensionLoader.PACKAGE_FLAGS)
-            }
+            // Look the addon up directly instead of listing every installed package (with signatures).
+            val installedPkgs = listOfNotNull(
+                try {
+                    pkgManager.getPackageInfo(packageName, PackageManager.GET_META_DATA)
+                } catch (_: PackageManager.NameNotFoundException) {
+                    null
+                }
+            )
 
             val extPkgs = installedPkgs.filter {
                 isPackageAnExtension(

@@ -24,12 +24,17 @@ import eu.kanade.tachiyomi.extension.InstallStep
 import eu.kanade.tachiyomi.extension.installer.Installer
 import eu.kanade.tachiyomi.util.storage.getUriCompat
 import eu.kanade.tachiyomi.util.system.isPackageInstalled
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import rx.Observable
 import rx.android.schedulers.AndroidSchedulers
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import uy.kohesive.injekt.injectLazy
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -53,7 +58,13 @@ class ExtensionInstaller(private val context: Context) {
      * The currently requested downloads, with the package name (unique id) as key, and the id
      * returned by the download manager.
      */
-    private val activeDownloads = hashMapOf<String, Long>()
+    private val activeDownloads = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Scope for the private installer's file copy, APK parsing and signature checks, which must not
+     * run on the main thread (download completion is delivered there).
+     */
+    private val installScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Relay used to notify the installation step of every download.
@@ -173,17 +184,20 @@ class ExtensionInstaller(private val context: Context) {
         var installer = extensionInstaller.get()
         if (installer == BasePreferences.ExtensionInstaller.PRIVATE) {
             if (type is MediaType) {
-                try {
-                    val file = getDownloadFile(downloadId)
-                    if (file != null && ExtensionLoader.installPrivateExtensionFile(context, file, type)) {
-                        updateInstallStep(downloadId, InstallStep.Installed)
-                    } else {
+                // The install step is observed on the main thread, so it can be posted from here.
+                installScope.launch {
+                    try {
+                        val file = getDownloadFile(downloadId)
+                        if (file != null && ExtensionLoader.installPrivateExtensionFile(context, file, type)) {
+                            updateInstallStep(downloadId, InstallStep.Installed)
+                        } else {
+                            updateInstallStep(downloadId, InstallStep.Error)
+                        }
+                        file?.delete()
+                    } catch (e: Exception) {
+                        Logger.log("Failed to install private extension: $e")
                         updateInstallStep(downloadId, InstallStep.Error)
                     }
-                    file?.delete()
-                } catch (e: Exception) {
-                    Logger.log("Failed to install private extension: $e")
-                    updateInstallStep(downloadId, InstallStep.Error)
                 }
                 return
             } else {

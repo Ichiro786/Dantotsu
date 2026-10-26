@@ -404,9 +404,10 @@ internal class ExtensionGithubApi {
 
     suspend fun findAnimeExtensions(): List<AnimeExtension.Available> {
         return withIOContext {
-            val extensions: ArrayList<AnimeExtension.Available> = arrayListOf()
             val repos = PrefManager.getVal<Set<String>>(PrefName.AnimeExtensionRepos).toMutableList()
 
+            // Each repo returns its own list; merging happens after all fetches finish, so no
+            // shared mutable list is touched from several threads.
             repos.asyncMap {
                 try {
                     var repoExtensions = fetchExtensions(it, MediaType.ANIME)
@@ -416,13 +417,13 @@ internal class ExtensionGithubApi {
                             repoExtensions = fetchExtensions(fallback, MediaType.ANIME)
                         }
                     }
-                    extensions.addAll(repoExtensions.toAnimeExtensions(it))
+                    repoExtensions.toAnimeExtensions(it)
                 } catch (e: Throwable) {
-                    Logger.log("Failed to get anime extensions")
+                    Logger.log("Failed to get anime extensions from $it")
                     Logger.log(e)
+                    emptyList()
                 }
-            }
-            extensions
+            }.flatten()
         }
     }
 
@@ -475,9 +476,10 @@ internal class ExtensionGithubApi {
 
     suspend fun findMangaExtensions(): List<MangaExtension.Available> {
         return withIOContext {
-            val extensions: ArrayList<MangaExtension.Available> = arrayListOf()
             val repos = PrefManager.getVal<Set<String>>(PrefName.MangaExtensionRepos).toMutableList()
 
+            // Each repo returns its own list; merging happens after all fetches finish, so no
+            // shared mutable list is touched from several threads.
             repos.asyncMap {
                 try {
                     var repoExtensions = fetchExtensions(it, MediaType.MANGA)
@@ -487,13 +489,13 @@ internal class ExtensionGithubApi {
                             repoExtensions = fetchExtensions(fallback, MediaType.MANGA)
                         }
                     }
-                    extensions.addAll(repoExtensions.toMangaExtensions(it))
+                    repoExtensions.toMangaExtensions(it)
                 } catch (e: Throwable) {
-                    Logger.log("Failed to get manga extensions")
+                    Logger.log("Failed to get manga extensions from $it")
                     Logger.log(e)
+                    emptyList()
                 }
-            }
-            extensions
+            }.flatten()
         }
     }
 
@@ -507,9 +509,10 @@ internal class ExtensionGithubApi {
 
     suspend fun findNovelExtensions(): List<NovelExtension.Available> {
         return withIOContext {
-            val extensions: ArrayList<NovelExtension.Available> = arrayListOf()
             val repos = PrefManager.getVal<Set<String>>(PrefName.NovelExtensionRepos).toMutableList()
 
+            // Each repo returns its own list; merging happens after all fetches finish, so no
+            // shared mutable list is touched from several threads.
             repos.asyncMap {
                 try {
                     var repoExtensions = fetchExtensions(it, MediaType.NOVEL)
@@ -519,13 +522,13 @@ internal class ExtensionGithubApi {
                             repoExtensions = fetchExtensions(fallback, MediaType.NOVEL)
                         }
                     }
-                    extensions.addAll(repoExtensions.toNovelExtensions(it))
+                    repoExtensions.toNovelExtensions(it)
                 } catch (e: Throwable) {
-                    Logger.log("Failed to get novel extensions")
+                    Logger.log("Failed to get novel extensions from $it")
                     Logger.log(e)
+                    emptyList()
                 }
-            }
-            extensions
+            }.flatten()
         }
     }
 

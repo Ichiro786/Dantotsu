@@ -22,6 +22,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import rx.Observable
 import tachiyomi.core.util.lang.launchNow
@@ -146,6 +147,9 @@ class MangaExtensionManager(
 
         enableAdditionalSubLanguages(extensions)
 
+        // The update statuses are applied to the installed list, so wait until it has been loaded.
+        awaitInitialized()
+
         _availableExtensionsFlow.value = extensions
         updatedInstalledExtensionsStatuses(extensions)
         setupAvailableExtensionsSourcesDataMap(extensions)
@@ -192,43 +196,50 @@ class MangaExtensionManager(
             return
         }
 
-        val mutInstalledExtensions = _installedExtensionsFlow.value.toMutableList()
-        var changed = false
+        val reposToSave = mutableMapOf<String, Pair<String, String?>>()
+        _installedExtensionsFlow.update { installed ->
+            reposToSave.clear()
+            installed.map { installedExt ->
+                val pkgName = installedExt.pkgName
+                val availableExt = availableExtensions.find { it.pkgName == pkgName }
 
-        for ((index, installedExt) in mutInstalledExtensions.withIndex()) {
-            val pkgName = installedExt.pkgName
-            val availableExt = availableExtensions.find { it.pkgName == pkgName }
+                if (!installedExt.isUnofficial && availableExt == null && !installedExt.isObsolete) {
+                    installedExt.copy(isObsolete = true)
+                } else if (availableExt != null) {
+                    val hasUpdate = installedExt.updateExists(availableExt)
+                    val newRepo = availableExt.repository
+                    val newRepoName = availableExt.repoName
 
-            if (!installedExt.isUnofficial && availableExt == null && !installedExt.isObsolete) {
-                mutInstalledExtensions[index] = installedExt.copy(isObsolete = true)
-                changed = true
-            } else if (availableExt != null) {
-                val hasUpdate = installedExt.updateExists(availableExt)
-                val newRepo = availableExt.repository
-                val newRepoName = availableExt.repoName
-
-                if (installedExt.hasUpdate != hasUpdate ||
-                    installedExt.repository != newRepo ||
-                    installedExt.repoName != newRepoName ||
-                    installedExt.isUnofficial
-                ) {
-                    mutInstalledExtensions[index] = installedExt.copy(
-                        hasUpdate = hasUpdate,
-                        isUnofficial = false,
-                        repository = newRepo,
-                        repoName = newRepoName,
-                    )
-                    changed = true
-                    ani.dantotsu.parsers.ExtensionRepoMetaHelper.saveInstalledExtensionRepo(
-                        pkgName,
-                        newRepo,
-                        newRepoName
-                    )
+                    // Only persist the repo when it actually changed; isUnofficial is always true
+                    // right after loading, so it alone must not trigger a prefs write.
+                    if (installedExt.repository != newRepo || installedExt.repoName != newRepoName) {
+                        reposToSave[pkgName] = newRepo to newRepoName
+                    }
+                    if (installedExt.hasUpdate != hasUpdate ||
+                        installedExt.repository != newRepo ||
+                        installedExt.repoName != newRepoName ||
+                        installedExt.isUnofficial
+                    ) {
+                        installedExt.copy(
+                            hasUpdate = hasUpdate,
+                            isUnofficial = false,
+                            repository = newRepo,
+                            repoName = newRepoName,
+                        )
+                    } else {
+                        installedExt
+                    }
+                } else {
+                    installedExt
                 }
             }
         }
-        if (changed) {
-            _installedExtensionsFlow.value = mutInstalledExtensions
+        reposToSave.forEach { (pkgName, repo) ->
+            ani.dantotsu.parsers.ExtensionRepoMetaHelper.saveInstalledExtensionRepo(
+                pkgName,
+                repo.first,
+                repo.second
+            )
         }
         updatePendingUpdatesCount()
     }
@@ -297,7 +308,7 @@ class MangaExtensionManager(
      * @param extension The extension to be registered.
      */
     private fun registerNewExtension(extension: MangaExtension.Installed) {
-        _installedExtensionsFlow.value += extension
+        _installedExtensionsFlow.update { it + extension }
     }
 
     /**
@@ -307,14 +318,16 @@ class MangaExtensionManager(
      * @param extension The extension to be registered.
      */
     private fun registerUpdatedExtension(extension: MangaExtension.Installed) {
-        val mutInstalledExtensions = _installedExtensionsFlow.value.toMutableList()
-        val index = mutInstalledExtensions.indexOfFirst { it.pkgName == extension.pkgName }
-        if (index != -1) {
-            mutInstalledExtensions[index] = extension
-        } else {
-            mutInstalledExtensions.add(extension)
+        _installedExtensionsFlow.update { installed ->
+            val mutInstalledExtensions = installed.toMutableList()
+            val index = mutInstalledExtensions.indexOfFirst { it.pkgName == extension.pkgName }
+            if (index != -1) {
+                mutInstalledExtensions[index] = extension
+            } else {
+                mutInstalledExtensions.add(extension)
+            }
+            mutInstalledExtensions
         }
-        _installedExtensionsFlow.value = mutInstalledExtensions
     }
 
     /**
@@ -324,14 +337,8 @@ class MangaExtensionManager(
      * @param pkgName The package name of the uninstalled application.
      */
     private fun unregisterExtension(pkgName: String) {
-        val installedExtension = _installedExtensionsFlow.value.find { it.pkgName == pkgName }
-        if (installedExtension != null) {
-            _installedExtensionsFlow.value -= installedExtension
-        }
-        val untrustedExtension = _untrustedExtensionsFlow.value.find { it.pkgName == pkgName }
-        if (untrustedExtension != null) {
-            _untrustedExtensionsFlow.value -= untrustedExtension
-        }
+        _installedExtensionsFlow.update { installed -> installed.filterNot { it.pkgName == pkgName } }
+        _untrustedExtensionsFlow.update { untrusted -> untrusted.filterNot { it.pkgName == pkgName } }
     }
 
     /**
@@ -350,7 +357,7 @@ class MangaExtensionManager(
         }
 
         override fun onExtensionUntrusted(extension: MangaExtension.Untrusted) {
-            _untrustedExtensionsFlow.value += extension
+            _untrustedExtensionsFlow.update { it + extension }
         }
 
         override fun onPackageUninstalled(pkgName: String) {

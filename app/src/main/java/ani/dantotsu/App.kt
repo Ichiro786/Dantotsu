@@ -156,7 +156,9 @@ class App : Application(), GraphProvider<AppGraph> {
         applicationScope.launch(Dispatchers.IO) {
             animeExtensionManager = Injekt.get()
             launch {
-                delay(1500)
+                // Wait for the installed list instead of a fixed delay, so update checks
+                // never run against a not-yet-loaded (empty) list.
+                animeExtensionManager.awaitInitialized()
                 animeExtensionManager.findAvailableExtensions()
             }
             AnimeSources.init(animeExtensionManager.installedExtensionsFlow, animeExtensionManager)
@@ -164,7 +166,9 @@ class App : Application(), GraphProvider<AppGraph> {
         applicationScope.launch(Dispatchers.IO) {
             mangaExtensionManager = Injekt.get()
             launch {
-                delay(1500)
+                // Wait for the installed list instead of a fixed delay, so update checks
+                // never run against a not-yet-loaded (empty) list.
+                mangaExtensionManager.awaitInitialized()
                 mangaExtensionManager.findAvailableExtensions()
             }
             MangaSources.init(mangaExtensionManager.installedExtensionsFlow, mangaExtensionManager)
@@ -172,7 +176,9 @@ class App : Application(), GraphProvider<AppGraph> {
         applicationScope.launch(Dispatchers.IO) {
             novelExtensionManager = Injekt.get()
             launch {
-                delay(1500)
+                // Wait for the installed list instead of a fixed delay, so update checks
+                // never run against a not-yet-loaded (empty) list.
+                novelExtensionManager.awaitInitialized()
                 novelExtensionManager.findAvailableExtensions()
             }
             NovelSources.init(novelExtensionManager.allInstalledExtensionsFlow)

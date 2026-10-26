@@ -28,6 +28,8 @@ class NovelExtensionManager(private val context: Context) {
     val isInitialized: Boolean
         get() = danNovelManager.isInitialized
 
+    suspend fun awaitInitialized() = danNovelManager.awaitInitialized()
+
     val installedExtensionsFlow: StateFlow<List<NovelExtension.Installed>>
         get() = danNovelManager.installedExtensionsFlow
 

@@ -14,7 +14,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import rx.Observable
 import tachiyomi.core.util.lang.withUIContext
 
@@ -27,6 +30,14 @@ class DanNovelExtensionManager(private val context: Context) {
 
     var isInitialized = false
         private set
+
+    private val _isInitializedFlow = MutableStateFlow(false)
+    val isInitializedFlow = _isInitializedFlow.asStateFlow()
+
+    suspend fun awaitInitialized() {
+        if (isInitialized) return
+        _isInitializedFlow.first { it }
+    }
 
     private val scope = CoroutineScope(Dispatchers.IO)
     private val api = ExtensionGithubApi()
@@ -65,10 +76,12 @@ class DanNovelExtensionManager(private val context: Context) {
             .filterIsInstance<NovelLoadResult.Success>()
             .map { it.extension }
         isInitialized = true
+        _isInitializedFlow.value = true
         updatedInstalledNovelExtensionsStatuses(_availableNovelExtensionsFlow.value)
     }
 
-    fun refreshInstalledExtensions() {
+    /** Rescans the installed novel extensions off the main thread. */
+    suspend fun refreshInstalledExtensions() = withContext(Dispatchers.IO) {
         initNovelExtensions()
     }
 
@@ -87,6 +100,8 @@ class DanNovelExtensionManager(private val context: Context) {
             withUIContext { snackString("Failed to get Novel extensions list") }
             emptyList()
         }
+        // The update statuses are applied to the installed list, so wait until it has been loaded.
+        awaitInitialized()
         _availableNovelExtensionsFlow.value = extensions
         updatedInstalledNovelExtensionsStatuses(extensions)
         setupAvailableNovelExtensionsSourcesDataMap(extensions)
@@ -104,41 +119,50 @@ class DanNovelExtensionManager(private val context: Context) {
         availableNovelExtensions: List<NovelExtension.Available>
     ) {
         if (availableNovelExtensions.isEmpty()) return
-        val mut = _installedNovelExtensionsFlow.value.toMutableList()
-        var changed = false
-        for ((i, ext) in mut.withIndex()) {
-            val avail = availableNovelExtensions.find {
-                isSameNovelExtension(it.pkgName, it.name, ext.pkgName, ext.name)
-            }
-            if (avail == null && !ext.isObsolete) {
-                mut[i] = ext.copy(isObsolete = true)
-                changed = true
-            } else if (avail != null) {
-                val hasUpdate = ext.updateExists(avail)
-                val newRepo = avail.repository
-                val newRepoName = avail.repoName
+        val reposToSave = mutableMapOf<String, Pair<String, String?>>()
+        _installedNovelExtensionsFlow.update { installed ->
+            reposToSave.clear()
+            installed.map { ext ->
+                val avail = availableNovelExtensions.find {
+                    isSameNovelExtension(it.pkgName, it.name, ext.pkgName, ext.name)
+                }
+                if (avail == null && !ext.isObsolete) {
+                    ext.copy(isObsolete = true)
+                } else if (avail != null) {
+                    val hasUpdate = ext.updateExists(avail)
+                    val newRepo = avail.repository
+                    val newRepoName = avail.repoName
 
-                if (ext.hasUpdate != hasUpdate ||
-                    ext.repository != newRepo ||
-                    ext.repoName != newRepoName ||
-                    ext.isUnofficial
-                ) {
-                    mut[i] = ext.copy(
-                        hasUpdate = hasUpdate,
-                        isUnofficial = false,
-                        repository = newRepo,
-                        repoName = newRepoName,
-                    )
-                    changed = true
-                    ani.dantotsu.parsers.ExtensionRepoMetaHelper.saveInstalledExtensionRepo(
-                        ext.pkgName,
-                        newRepo,
-                        newRepoName
-                    )
+                    // Only persist the repo when it actually changed.
+                    if (ext.repository != newRepo || ext.repoName != newRepoName) {
+                        reposToSave[ext.pkgName] = newRepo to newRepoName
+                    }
+                    if (ext.hasUpdate != hasUpdate ||
+                        ext.repository != newRepo ||
+                        ext.repoName != newRepoName ||
+                        ext.isUnofficial
+                    ) {
+                        ext.copy(
+                            hasUpdate = hasUpdate,
+                            isUnofficial = false,
+                            repository = newRepo,
+                            repoName = newRepoName,
+                        )
+                    } else {
+                        ext
+                    }
+                } else {
+                    ext
                 }
             }
         }
-        if (changed) _installedNovelExtensionsFlow.value = mut
+        reposToSave.forEach { (pkgName, repo) ->
+            ani.dantotsu.parsers.ExtensionRepoMetaHelper.saveInstalledExtensionRepo(
+                pkgName,
+                repo.first,
+                repo.second
+            )
+        }
     }
 
     fun installExtension(extension: NovelExtension.Available): Observable<InstallStep> {
@@ -172,27 +196,31 @@ class DanNovelExtensionManager(private val context: Context) {
     fun uninstallExtension(pkgName: String) = installer.uninstallApk(pkgName)
 
     private fun registerNewExtension(ext: NovelExtension.Installed) {
-        val mut = _installedNovelExtensionsFlow.value.toMutableList()
-        mut.removeAll { isSameNovelExtension(it.pkgName, it.name, ext.pkgName, ext.name) }
-        mut.add(ext)
-        _installedNovelExtensionsFlow.value = mut
+        _installedNovelExtensionsFlow.update { installed ->
+            val mut = installed.toMutableList()
+            mut.removeAll { isSameNovelExtension(it.pkgName, it.name, ext.pkgName, ext.name) }
+            mut.add(ext)
+            mut
+        }
     }
 
     private fun registerUpdatedExtension(ext: NovelExtension.Installed) {
-        val mut = _installedNovelExtensionsFlow.value.toMutableList()
-        val index = mut.indexOfFirst { isSameNovelExtension(it.pkgName, it.name, ext.pkgName, ext.name) }
-        if (index != -1) {
-            mut[index] = ext
-        } else {
-            mut.add(ext)
+        _installedNovelExtensionsFlow.update { installed ->
+            val mut = installed.toMutableList()
+            val index = mut.indexOfFirst { isSameNovelExtension(it.pkgName, it.name, ext.pkgName, ext.name) }
+            if (index != -1) {
+                mut[index] = ext
+            } else {
+                mut.add(ext)
+            }
+            mut
         }
-        _installedNovelExtensionsFlow.value = mut
     }
 
     private fun unregisterNovelExtension(pkgName: String) {
-        val mut = _installedNovelExtensionsFlow.value.toMutableList()
-        mut.removeAll { isSameNovelExtension(it.pkgName, it.name, pkgName, "") }
-        _installedNovelExtensionsFlow.value = mut
+        _installedNovelExtensionsFlow.update { installed ->
+            installed.filterNot { isSameNovelExtension(it.pkgName, it.name, pkgName, "") }
+        }
     }
 
     private inner class NovelInstallationListener : ExtensionInstallReceiver.NovelListener {
