@@ -63,6 +63,7 @@ import java.net.URLEncoder
 
 
 class MediaInfoFragment : Fragment() {
+    private var mangaExtrasLoadedFor: Int? = null
     private var _binding: FragmentMediaInfoBinding? = null
     private val binding get() = _binding!!
     private var timer: CountDownTimer? = null
@@ -357,7 +358,14 @@ class MediaInfoFragment : Fragment() {
                 val screenWidth = resources.displayMetrics.run { widthPixels / density }
 
                 if (media.manga != null && !offline) {
-                    model.loadMangaExtras(media)
+                    // runs on every media emission: fetch extras once per title and keep a
+                    // single observer per LiveData (they used to stack up)
+                    if (mangaExtrasLoadedFor != media.id) {
+                        mangaExtrasLoadedFor = media.id
+                        model.loadMangaExtras(media)
+                    }
+                    model.adaptation.removeObservers(viewLifecycleOwner)
+                    model.nextRelease.removeObservers(viewLifecycleOwner)
 
                     model.adaptation.observe(viewLifecycleOwner) {
                         it?.let { displayAnimeAdaptation(it) }

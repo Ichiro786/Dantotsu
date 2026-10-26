@@ -82,14 +82,17 @@ class SourceSearchDialogFragment : BottomSheetDialogFragment() {
                 fun search() {
                     binding.searchBarText.clearFocus()
                     imm.hideSoftInputFromWindow(binding.searchBarText.windowToken, 0)
-                    scope.launch {
-                        model.responses.postValue(
-                            withContext(Dispatchers.IO) {
-                                tryWithSuspend {
-                                    source?.search(binding.searchBarText.text.toString())
-                                }
+                    // read the query on the main thread, and let only the newest search post
+                    // results (an older, slower one used to overwrite newer results)
+                    val query = binding.searchBarText.text.toString()
+                    searchJob?.cancel()
+                    searchJob = viewLifecycleOwner.lifecycleScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            tryWithSuspend {
+                                source?.search(query)
                             }
-                        )
+                        }
+                        model.responses.value = result
                     }
                 }
                 binding.searchSourceTitle.text = source?.name ?: "Search"
@@ -107,6 +110,8 @@ class SourceSearchDialogFragment : BottomSheetDialogFragment() {
                 binding.searchBar.setEndIconOnClickListener { search() }
                 if (!searched) search()
                 searched = true
+                // this block runs for every media emission: don't stack observers
+                model.responses.removeObservers(viewLifecycleOwner)
                 model.responses.observe(viewLifecycleOwner) { j ->
                     if (j != null) {
                         binding.searchRecyclerView.visibility = View.VISIBLE
@@ -132,7 +137,13 @@ class SourceSearchDialogFragment : BottomSheetDialogFragment() {
         }
     }
 
+    private var searchJob: kotlinx.coroutines.Job? = null
+
     override fun onDestroyView() {
+        searchJob?.cancel()
+        // swipe-down / back don't go through dismiss(): clear here so the next open
+        // doesn't show the previous source's results
+        model.responses.value = null
         super.onDestroyView()
         _binding = null
     }

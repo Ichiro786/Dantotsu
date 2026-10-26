@@ -182,9 +182,8 @@ class UserInterfaceSettingsActivity : AppCompatActivity() {
         val mapReverse = map.map { it.value to it.key }.toMap()
         binding.uiSettingsAnimationSpeed.value =
             mapReverse[PrefManager.getVal(PrefName.AnimationSpeed)] ?: 1f
-        binding.uiSettingsAnimationSpeed.addOnChangeListener { _, value, _ ->
+        binding.uiSettingsAnimationSpeed.restartOnRelease { value ->
             PrefManager.setVal(PrefName.AnimationSpeed, map[value] ?: 1f)
-            restartApp()
         }
         binding.uiSettingsBlurBanners.isChecked = PrefManager.getVal(PrefName.BlurBanners)
         binding.uiSettingsBlurBanners.setOnCheckedChangeListener { _, isChecked ->
@@ -192,15 +191,36 @@ class UserInterfaceSettingsActivity : AppCompatActivity() {
             restartApp()
         }
         binding.uiSettingsBlurRadius.value = (PrefManager.getVal(PrefName.BlurRadius) as Float)
-        binding.uiSettingsBlurRadius.addOnChangeListener { _, value, _ ->
+        binding.uiSettingsBlurRadius.restartOnRelease { value ->
             PrefManager.setVal(PrefName.BlurRadius, value)
-            restartApp()
         }
         binding.uiSettingsBlurSampling.value = (PrefManager.getVal(PrefName.BlurSampling) as Float)
-        binding.uiSettingsBlurSampling.addOnChangeListener { _, value, _ ->
+        binding.uiSettingsBlurSampling.restartOnRelease { value ->
             PrefManager.setVal(PrefName.BlurSampling, value)
-            restartApp()
         }
+    }
+
+    /**
+     * Saves every value step but restarts the app only once the user lets go of the slider
+     * (it restarted on every drag step before). Non-touch changes (keyboard / accessibility)
+     * still restart immediately.
+     */
+    private fun com.google.android.material.slider.Slider.restartOnRelease(save: (Float) -> Unit) {
+        var tracking = false
+        addOnChangeListener { _, value, fromUser ->
+            save(value)
+            if (fromUser && !tracking) restartApp()
+        }
+        addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                tracking = true
+            }
+
+            override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                tracking = false
+                restartApp()
+            }
+        })
     }
 
     inner class HomeLayoutAdapter(

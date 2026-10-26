@@ -396,17 +396,30 @@ class PlayerSubtitleManager(
                     }
                 }
             }
-            fontDirs.forEach { dir ->
-                if (dir.isDirectory) {
-                    dir.walkTopDown()
-                        .filter { it.isFile && (it.extension.equals("ttf", true) || it.extension.equals("otf", true) || it.extension.equals("ttc", true)) }
-                        .forEach { file ->
-                            if (loadedFontNames.add(file.name)) {
-                                handler.addFont(file.name, file.readBytes())
-                            }
+            // Walking the font dirs and reading the files (CJK fonts are 10-20 MB) happened on
+            // the main thread while the player opened. Read them on a background thread and hand
+            // the bytes to libass on the main thread (the handler is used from there).
+            val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+            Thread {
+                val fonts = mutableListOf<Pair<String, ByteArray>>()
+                runCatching {
+                    fontDirs.forEach { dir ->
+                        if (dir.isDirectory) {
+                            dir.walkTopDown()
+                                .filter { it.isFile && (it.extension.equals("ttf", true) || it.extension.equals("otf", true) || it.extension.equals("ttc", true)) }
+                                .forEach { file ->
+                                    if (synchronized(loadedFontNames) { loadedFontNames.add(file.name) }) {
+                                        fonts += file.name to file.readBytes()
+                                    }
+                                }
                         }
+                    }
                 }
-            }
+                if (fonts.isNotEmpty()) mainHandler.post {
+                    if (assHandler !== handler) return@post
+                    fonts.forEach { (name, bytes) -> runCatching { handler.addFont(name, bytes) } }
+                }
+            }.start()
         }
     }
 

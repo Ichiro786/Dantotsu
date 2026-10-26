@@ -50,13 +50,18 @@ class PlayerScreenshotManager(
                 val epSuffix = if (!episodeNum.isNullOrBlank()) "_EP$episodeNum" else ""
                 val fileName = "${cleanTitle}${epSuffix}_${timeStamp}.png"
 
-                val uri = saveBitmapToGallery(activity, bitmap, fileName)
-                if (uri != null) {
-                    toast(activity.getString(R.string.screenshot_saved))
-                } else {
-                    snackString("Failed to save screenshot", activity)
-                }
-                onComplete?.invoke(bitmap, uri)
+                // PNG encoding + MediaStore write takes 200-800 ms: keep it off the main thread
+                Thread {
+                    val uri = saveBitmapToGallery(activity, bitmap, fileName)
+                    activity.runOnUiThread {
+                        if (uri != null) {
+                            toast(activity.getString(R.string.screenshot_saved))
+                        } else {
+                            snackString("Failed to save screenshot", activity)
+                        }
+                        onComplete?.invoke(bitmap, uri)
+                    }
+                }.start()
             } else {
                 snackString("Failed to capture screenshot", activity)
                 onComplete?.invoke(null, null)
