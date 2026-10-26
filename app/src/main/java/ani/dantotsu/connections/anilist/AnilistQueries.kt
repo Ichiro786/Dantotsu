@@ -105,7 +105,7 @@ class AnilistQueries {
             ObjectOutputStream(tmp.outputStream().buffered()).use { it.writeObject(value) }
             tmp.renameTo(file)
         } catch (e: Exception) {
-            Logger.log(e)
+            ani.dantotsu.util.Logger.log(e)
         }
         clearLegacyPrefCaches()
     }
