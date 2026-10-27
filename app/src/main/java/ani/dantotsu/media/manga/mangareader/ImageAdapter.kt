@@ -21,6 +21,8 @@ import ani.dantotsu.settings.saving.PrefName
 import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
 import com.davemorrissey.labs.subscaleview.ImageSource
 import com.davemorrissey.labs.subscaleview.SubsamplingScaleImageView
+import com.davemorrissey.labs.subscaleview.decoder.DecoderFactory
+import com.davemorrissey.labs.subscaleview.decoder.ImageRegionDecoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -182,7 +184,18 @@ open class ImageAdapter(
         }
 
         imageView.visibility = View.VISIBLE
-        imageView.setImage(ImageSource.cachedBitmap(bitmap))
+        if (TiledBitmapDecoder.needsTiling(bitmap)) {
+            // Taller/wider than a GPU texture can be: let SSIV draw it in tiles (see TiledBitmapDecoder).
+            val tileSource = if (bitmap.config == Bitmap.Config.HARDWARE) {
+                withContext(Dispatchers.IO) { bitmap.copy(Bitmap.Config.ARGB_8888, false) } ?: bitmap
+            } else bitmap
+            if (!currentCoroutineContext().isActive) return false
+            imageView.setMaxTileSize(TiledBitmapDecoder.TILE_SIZE)
+            imageView.setRegionDecoderFactory(DecoderFactory<ImageRegionDecoder> { TiledBitmapDecoder() })
+            imageView.setImage(ImageSource.uri(TiledBitmapDecoder.register(tileSource)))
+        } else {
+            imageView.setImage(ImageSource.cachedBitmap(bitmap))
+        }
 
         val parentArea = sWidth * sHeight * 1f
         val bitmapArea = bitmap.width * bitmap.height * 1f
