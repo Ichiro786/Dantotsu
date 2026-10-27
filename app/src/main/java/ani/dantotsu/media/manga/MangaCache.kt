@@ -3,7 +3,6 @@ package ani.dantotsu.media.manga
 import android.content.ContentResolver
 import android.content.ContentValues
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -31,34 +30,27 @@ data class ImageData(
     ): Bitmap? {
         return withContext(Dispatchers.IO) {
             try {
-                val dataSaver = createDataSaver()
-                val compressedUrl = dataSaver.compress(page.imageUrl ?: "")
-                
-                val originalUrl = page.imageUrl
-                var bitmap: Bitmap? = null
-                var success = false
-
-                val decodeOptions = BitmapFactory.Options().apply {
-                    inPreferredConfig = Bitmap.Config.RGB_565
+                // Pages whose image url needs its own request are resolved here, on first load.
+                MangaImageFetcher.ensureImageUrl(page, httpSource)
+                val originalUrl = page.imageUrl ?: return@withContext null
+                if (MangaImageFetcher.isDataUri(originalUrl)) {
+                    return@withContext MangaImageFetcher.decodeDataUri(originalUrl)
+                        ?.let { MangaImageFetcher.decodeBitmap(it) }
                 }
+                val dataSaver = createDataSaver()
+                val compressedUrl = dataSaver.compress(originalUrl)
+                var bitmap: Bitmap? = null
 
                 if (compressedUrl != originalUrl) {
                     try {
                         page.imageUrl = compressedUrl
                         val response = httpSource.getImage(page)
                         Logger.log("DataSaver Response: ${response.code} - ${response.message}")
-                        if (response.isSuccessful) {
-                            bitmap = response.use {
-                                it.body.byteStream().use { inputStream ->
-                                    BitmapFactory.decodeStream(inputStream, null, decodeOptions)
-                                }
-                            }
-                            if (bitmap != null) {
-                                success = true
-                            }
-                        } else {
-                            response.close()
+                        bitmap = response.use {
+                            if (it.isSuccessful) MangaImageFetcher.decodeBitmap(it.body.bytes()) else null
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         Logger.log("DataSaver failed, falling back to original: ${e.message}")
                     } finally {
@@ -66,20 +58,16 @@ data class ImageData(
                     }
                 }
 
-                if (!success) {
+                if (bitmap == null) {
                     if (compressedUrl != originalUrl) {
                         Logger.log("DataSaver failed or was blocked by Cloudflare; falling back to original URL: $originalUrl")
                     }
                     val response = httpSource.getImage(page)
                     Logger.log("Response: ${response.code} - ${response.message}")
-                    if (response.isSuccessful) {
-                        bitmap = response.use {
-                            it.body.byteStream().use { inputStream ->
-                                BitmapFactory.decodeStream(inputStream, null, decodeOptions)
-                            }
-                        }
-                    } else {
-                        response.close()
+                    // Bytes first, then BitmapFactory with a libvips fallback (AVIF/JXL/HEIF the
+                    // platform can't decode used to come back null here).
+                    bitmap = response.use {
+                        if (it.isSuccessful) MangaImageFetcher.decodeBitmap(it.body.bytes()) else null
                     }
                 }
 
@@ -147,7 +135,9 @@ fun saveImage(
 }
 
 class MangaCache {
-    private val maxEntries = 500
+    // ImageData is tiny (a Page and a source reference); keep plenty so a long session or a
+    // second reader instance never falls back to loading without the source's client.
+    private val maxEntries = 3000
     private val cache = LruCache<String, ImageData>(maxEntries)
     private val cacheSizeKb = ((Runtime.getRuntime().maxMemory() / 1024) / 8).toInt().coerceIn(32 * 1024, 96 * 1024)
     private class CachedBitmap(val bitmap: Bitmap, val sizeKb: Int)

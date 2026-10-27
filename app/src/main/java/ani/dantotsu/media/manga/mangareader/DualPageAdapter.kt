@@ -150,9 +150,9 @@ class DualPageAdapter(
             }
         }
 
-        val bitmap1 = activity.loadBitmap(link1, transforms1) ?: return null
+        val bitmap1 = activity.loadBitmap(link1, transforms1, img1) ?: return null
         val bitmap2 = if (link2 != null) {
-            val b2 = activity.loadBitmap(link2, transforms2)
+            val b2 = activity.loadBitmap(link2, transforms2, img2)
             if (b2 == null) {
                 return null
             }

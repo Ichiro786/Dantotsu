@@ -25,6 +25,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.withContext
 
 open class ImageAdapter(
@@ -93,7 +95,7 @@ open class ImageAdapter(
             transforms.add(RemoveBordersTransformation(false, settings.cropBorderThreshold))
         }
 
-        return activity.loadBitmap(link, transforms)
+        return activity.loadBitmap(link, transforms, pageItem.image)
     }
 
     override suspend fun loadImage(position: Int, parent: View): Boolean {
@@ -101,17 +103,30 @@ open class ImageAdapter(
             ?: return false
         val progress = parent.findViewById<View>(R.id.imgProgProgress) ?: return false
 
+        val errorView = parent.findViewById<View>(R.id.imgProgError)
+
         parent.setTag(R.id.imgProgImageNoGestures, null)
         imageView.recycle()
         imageView.visibility = View.GONE
+        errorView?.visibility = View.GONE
         progress.visibility = View.VISIBLE
 
         var bitmap = loadBitmap(position, parent)
-        if (bitmap == null) {
+        if (bitmap == null && currentCoroutineContext().isActive) {
             delay(350)
             bitmap = loadBitmap(position, parent)
         }
         if (bitmap == null) {
+            // Every route failed: show a Retry instead of spinning forever.
+            if (currentCoroutineContext().isActive) {
+                progress.visibility = View.GONE
+                errorView?.visibility = View.VISIBLE
+                parent.findViewById<View>(R.id.imgProgRetry)?.setOnClickListener {
+                    val pos = (parent.parent as? RecyclerView)?.getChildAdapterPosition(parent)
+                        ?.takeIf { it != RecyclerView.NO_POSITION } ?: position
+                    activity.lifecycleScope.launch { loadImage(pos, parent) }
+                }
+            }
             return false
         }
 
@@ -130,10 +145,12 @@ open class ImageAdapter(
                     sHeight =
                         if (settings.wrapImages) bitmap.height else (sWidth * bitmap.height * 1f / bitmap.width).toInt()
                     height = sHeight
+                    itemSizeKey(position)?.let { knownItemSize[it] = sHeight }
                 } else {
                     sWidth =
                         if (settings.wrapImages) bitmap.width else (sHeight * bitmap.width * 1f / bitmap.height).toInt()
                     width = sWidth
+                    itemSizeKey(position)?.let { knownItemSize[it] = sWidth }
                 }
             }
 

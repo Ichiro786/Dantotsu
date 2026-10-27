@@ -20,6 +20,7 @@ import ani.dantotsu.R
 import ani.dantotsu.databinding.ItemChapterTransitionBinding
 import ani.dantotsu.media.manga.MangaCache
 import ani.dantotsu.media.manga.MangaChapter
+import ani.dantotsu.media.manga.MangaImageFetcher
 import ani.dantotsu.px
 import ani.dantotsu.settings.CurrentReaderSettings
 import ani.dantotsu.tryWithSuspend
@@ -103,6 +104,15 @@ abstract class BaseImageAdapter(
             is ReaderItem.Transition -> VIEW_TYPE_TRANSITION
             else -> VIEW_TYPE_IMAGE
         }
+    }
+
+    /** Laid-out main-axis size of each loaded page (continuous modes), keyed by [itemSizeKey]. */
+    protected val knownItemSize = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    protected fun itemSizeKey(position: Int): String? = when (val item = items.getOrNull(position)) {
+        is ReaderItem.Page -> item.image.url.url
+        is ReaderItem.DualPage -> item.first.url.url + "|" + (item.second?.url?.url ?: "")
+        else -> null
     }
 
     open fun appendChapter(nextChap: MangaChapter, afterNextChap: MangaChapter? = null) {}
@@ -268,12 +278,16 @@ abstract class BaseImageAdapter(
                     )
                 }
             }
+            // A page that was already laid out keeps its size on re-bind (recycling, scrolling
+            // back, notifyItemChanged): collapsing it to the 480dp placeholder and growing it again
+            // made continuous mode jump.
+            val known = itemSizeKey(position)?.let { knownItemSize[it] }
             view.updateLayoutParams {
                 if (settings.direction != CurrentReaderSettings.Directions.LEFT_TO_RIGHT && settings.direction != CurrentReaderSettings.Directions.RIGHT_TO_LEFT) {
                     width = ViewGroup.LayoutParams.MATCH_PARENT
-                    height = 480f.px
+                    height = known ?: 480f.px
                 } else {
-                    width = 480f.px
+                    width = known ?: 480f.px
                     height = ViewGroup.LayoutParams.MATCH_PARENT
                 }
             }
@@ -334,7 +348,7 @@ abstract class BaseImageAdapter(
                                     .skipMemoryCache(true)
                                     .diskCacheStrategy(DiskCacheStrategy.NONE)
                             } else {
-                                it.load(GlideUrl(link.url) { link.headers })
+                                it.load(GlideUrl(link.url) { MangaImageFetcher.validHeaders(link.headers) })
                             }
                         }
                         .let {
@@ -352,7 +366,8 @@ abstract class BaseImageAdapter(
 
         suspend fun Context.loadBitmap(
             link: FileUrl,
-            transforms: List<BitmapTransformation>
+            transforms: List<BitmapTransformation>,
+            image: MangaImage? = null
         ): Bitmap? {
             return tryWithSuspend {
                 val mangaCache = uy.kohesive.injekt.Injekt.get<MangaCache>()
@@ -391,17 +406,23 @@ abstract class BaseImageAdapter(
                                 contentResolver.openInputStream(Uri.parse(link.url))?.use { decodeWithLibvips(it) }
                             } catch (_: Exception) { null }
                         }
+                        MangaImageFetcher.isDataUri(link.url) -> {
+                            MangaImageFetcher.decodeDataUri(link.url)?.let { MangaImageFetcher.decodeBitmap(it) }
+                        }
                         else -> {
-                            val imageData = mangaCache.get(link.url)
+                            // The page's own source first (headers, cookies and interceptors of
+                            // the extension), then the URL-keyed cache entry.
+                            val imageData = MangaImageFetcher.imageDataFor(image, link.url)
                             val cachedBitmap = imageData?.fetchAndProcessImage(
                                 imageData.page,
                                 imageData.source
                             )
-                            cachedBitmap ?: run {
+                            val headers = MangaImageFetcher.validHeaders(link.headers)
+                            cachedBitmap ?: if (!link.url.startsWith("http")) null else run {
                                 val glideBitmap = try {
                                     Glide.with(this@loadBitmap)
                                         .asBitmap()
-                                        .load(GlideUrl(link.url) { link.headers })
+                                        .load(GlideUrl(link.url) { headers })
                                         .diskCacheStrategy(DiskCacheStrategy.DATA)
                                         .submit()
                                         .get()
@@ -413,10 +434,10 @@ abstract class BaseImageAdapter(
                                     try {
                                         val okHttpClient = uy.kohesive.injekt.Injekt.get<OkHttpClient>()
                                         val requestBuilder = Request.Builder().url(link.url)
-                                        link.headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
+                                        headers.forEach { (k, v) -> requestBuilder.header(k, v) }
                                         okHttpClient.newCall(requestBuilder.build()).execute().use { response ->
                                             if (response.isSuccessful) {
-                                                response.body?.byteStream()?.use { decodeWithLibvips(it) }
+                                                response.body.byteStream().use { decodeWithLibvips(it) }
                                             } else null
                                         }
                                     } catch (_: Exception) {

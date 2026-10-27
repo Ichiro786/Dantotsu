@@ -581,45 +581,30 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
     override suspend fun loadImages(chapterLink: String, sChapter: SChapter): List<MangaImage> {
         val source = (extension.sources.getOrNull(sourceLanguage)
             ?: extension.sources.firstOrNull()) as? HttpSource ?: return emptyList()
-        val imageDataList: MutableList<ImageData> = mutableListOf()
-        val ret = coroutineScope {
-            try {
-                Logger.log("source.name " + source.name)
-                val res = source.getPageList(sChapter)
-                val reIndexedPages =
-                    res.mapIndexed { index, page -> Page(index, page.url, page.imageUrl, page.uri) }
+        return try {
+            Logger.log("source.name " + source.name)
+            // getPageList: suspend API (extensions-lib 1.5+/KeiSource) or, through the HttpSource
+            // default, the Rx fetchPageList/pageListParse of older and ParsedHttpSource extensions.
+            val res = source.getPageList(sChapter)
+            // Page order is the list order (Mihon ignores Page.index), so re-index it.
+            val reIndexedPages =
+                res.mapIndexed { index, page -> Page(index, page.url, page.imageUrl, page.uri) }
 
-                val semaphore = Semaphore(5)
-                val deferreds = reIndexedPages.map { page ->
-                    async(Dispatchers.IO) {
-                        semaphore.withPermit {
-                            val imageUrl = if (page.imageUrl.isNullOrBlank()) {
-                                runCatching { source.getImageUrl(page) }.getOrNull() ?: page.imageUrl
-                            } else {
-                                page.imageUrl
-                            }
-                            val resolvedPage = if (imageUrl != page.imageUrl) {
-                                Page(page.index, page.url, imageUrl, page.uri)
-                            } else {
-                                page
-                            }
-                            mangaCache.put(resolvedPage.imageUrl ?: "", ImageData(resolvedPage, source))
-                            imageDataList += ImageData(resolvedPage, source)
-                            Logger.log("put page: ${resolvedPage.imageUrl}")
-                            pageToMangaImage(resolvedPage)
-                        }
-                    }
-                }
-
-                deferreds.awaitAll()
-
-            } catch (e: Exception) {
-                Logger.log("loadImages Exception: $e")
-                snackString("Failed to load images: $e")
-                emptyList()
+            // Image urls that need a request of their own (imageUrlParse) are no longer resolved
+            // for every page before the reader opens: like Mihon, they are resolved when the page
+            // is actually loaded (ImageData / MangaImageFetcher call source.getImageUrl lazily).
+            reIndexedPages.map { page ->
+                val image = pageToMangaImage(page, source)
+                mangaCache.put(image.url.url, ImageData(page, source))
+                image
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Logger.log("loadImages Exception: $e")
+            snackString("Failed to load images: $e")
+            emptyList()
         }
-        return ret
     }
 
     suspend fun imageList(sChapter: SChapter): List<ImageData> {
@@ -706,14 +691,18 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
         }
     }
 
-    private fun pageToMangaImage(page: Page): MangaImage {
+    private fun pageToMangaImage(page: Page, source: HttpSource? = null): MangaImage {
         var headersMap = mapOf<String, String>()
-        var url = ""
+        // A page whose image url is resolved lazily is keyed by its page url (unique per page).
+        val url = page.imageUrl?.takeIf { it.isNotBlank() }
+            ?: page.url.takeIf { it.isNotBlank() }
+            ?: "page:${page.index}"
 
-        page.imageUrl?.let {
+        page.imageUrl?.takeIf { !it.startsWith("data:") }?.let {
             val splitUrl = it.split("&")
-            url = it
-
+            // Legacy "key=value&key=value" header encoding. Only real header names are kept:
+            // query parameters like "https://host/x.jpg?token" made OkHttp/Glide throw
+            // "Unexpected char" and broke every non-source fallback for urls with a query.
             headersMap = splitUrl.mapNotNull { part ->
                 val idx = part.indexOf("=")
                 if (idx != -1) {
@@ -721,19 +710,20 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
                         val key = URLDecoder.decode(part.substring(0, idx), "UTF-8")
                         val value = URLDecoder.decode(part.substring(idx + 1), "UTF-8")
                         Pair(key, value)
-                    } catch (e: UnsupportedEncodingException) {
+                    } catch (e: Exception) {
                         null
                     }
                 } else {
                     null
                 }
-            }.toMap()
+            }.toMap().let { ani.dantotsu.media.manga.MangaImageFetcher.validHeaders(it) }
         }
 
         return MangaImage(
             FileUrl(url, headersMap),
             false,
-            page
+            page,
+            source
         )
     }
 

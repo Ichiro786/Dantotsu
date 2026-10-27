@@ -1067,6 +1067,18 @@ class MediaDetailsViewModel : ViewModel() {
         post: Boolean = true
     ): Boolean {
 
+        // Already loaded (ChapterLoaderDialog, chapter preloading): addImages() would ignore a
+        // second list anyway, so don't fetch the page list again (rate-limited sources took
+        // seconds to open the reader, and the re-post re-applied the reader settings).
+        val loaded = chapter.images()
+        if (loaded.isNotEmpty() && loaded.all {
+                it.source != null || !it.url.url.startsWith("http") ||
+                    ani.dantotsu.media.manga.MangaImageFetcher.imageDataFor(it, it.url.url) != null
+            }
+        ) {
+            if (post) mangaChapter.postValue(chapter)
+            return true
+        }
         return tryWithSuspend(true) {
             chapter.addImages(
                 mangaReadSources?.get(selected.sourceIndex)

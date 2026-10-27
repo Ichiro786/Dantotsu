@@ -215,7 +215,10 @@ class MangaReaderActivity : AppCompatActivity() {
         webGpuReaderView?.destroy()
         webGpuReaderView = null
         autoScrollHelper.destroy()
-        mangaCache.clear()
+        // Only the decoded bitmaps: the page -> source entries are tiny, and wiping them (on
+        // rotation, or when a finishing reader's onDestroy runs after the next reader started)
+        // made pages load without the extension's headers/client.
+        mangaCache.clearBitmaps()
         goneHandler.removeCallbacksAndMessages(null)
         pageSliderHandler.removeCallbacksAndMessages(null)
         RPCManager.clearPresence(this)
@@ -397,7 +400,7 @@ class MangaReaderActivity : AppCompatActivity() {
 
         //Chapter Change
         fun change(index: Int) {
-            mangaCache.clear()
+            mangaCache.clearBitmaps()
             PrefManager.setCustomVal(
                 "${media.id}_${chaptersArr[currentChapterIndex]}",
                 currentChapterPage
@@ -462,7 +465,7 @@ class MangaReaderActivity : AppCompatActivity() {
             if (currentImage != null) {
                 snackString(getString(R.string.translating_page))
                 scope.launch(Dispatchers.IO) {
-                    val loadedBitmap = loadBitmap(currentImage.url, emptyList<BitmapTransformation>())
+                    val loadedBitmap = loadBitmap(currentImage.url, emptyList<BitmapTransformation>(), currentImage)
                     if (loadedBitmap != null) {
                         val softwareBitmap = if (loadedBitmap.config == Bitmap.Config.HARDWARE) {
                             loadedBitmap.copy(Bitmap.Config.ARGB_8888, false)

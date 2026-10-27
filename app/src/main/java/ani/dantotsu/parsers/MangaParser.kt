@@ -6,6 +6,7 @@ import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.online.HttpSource
 import java.io.Serializable
 
 abstract class MangaParser : BaseParser() {
@@ -95,6 +96,13 @@ data class MangaImage(
     val useTransformation: Boolean = false,
 
     @Transient val page: Page? = null,
+
+    /**
+     * The extension source the [page] came from. Images are downloaded through it
+     * (source.getImage -> imageRequest + the source's OkHttp client and interceptors), so a
+     * reader page never depends on the URL-keyed MangaCache entry still being there.
+     */
+    @Transient val source: HttpSource? = null,
 ) : Serializable {
     constructor(url: String, useTransformation: Boolean = false, page: Page? = null)
             : this(FileUrl(url), useTransformation, page)

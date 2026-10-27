@@ -1217,6 +1217,9 @@ Non quae tempore quo provident laudantium qui illo dolor vel quia dolor et exerc
     <string name="privacy_policy">Privacy Policy</string>
     <string name="privacy_policy_desc">Read our privacy policy</string>
     <string name="failed_to_load">Failed to load</string>
+    <string name="reader_page_failed">Couldn\'t load this page</string>
+    <string name="reader_retry">Retry</string>
+    <string name="reader_page_failed_tap_retry">Couldn\'t load page %1$d. Tap the page to retry</string>
     <string name="studios">Studios</string>
     <string name="next_chapter_prediction">Next Chapter Prediction</string>
     <string name="anime_adaptation">Anime Adaptation</string>

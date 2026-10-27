@@ -37,6 +37,35 @@
             android:id="@+id/imgProgCover"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
+
+        <!-- Shown instead of an endless spinner when a page could not be loaded -->
+        <LinearLayout
+            android:id="@+id/imgProgError"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="@font/poppins_semi_bold"
+                android:gravity="center"
+                android:text="@string/reader_page_failed"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:textSize="14sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/imgProgRetry"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/reader_retry"
+                app:icon="@drawable/ic_round_refresh_24" />
+        </LinearLayout>
     </FrameLayout>
 
 
