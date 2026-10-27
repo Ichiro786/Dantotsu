@@ -109,7 +109,7 @@
             android:fontFamily="@font/poppins_semi_bold"
             android:gravity="center"
             android:text="@string/tab_layout"
-            android:textColor="?attr/colorPrimary"
+            android:textColor="?attr/colorOnPrimaryContainer"
             android:textSize="12sp" />
 
         <TextView

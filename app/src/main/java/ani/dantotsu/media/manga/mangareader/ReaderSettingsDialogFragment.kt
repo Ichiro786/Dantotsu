@@ -80,18 +80,22 @@ class ReaderSettingsDialogFragment : BottomSheetDialogFragment() {
             binding.tabDataContent
         )
 
-        val primaryColor = requireContext().getThemeColor(androidx.appcompat.R.attr.colorPrimary)
+        // Selected label uses the "on" colour of the pill it sits on: colorPrimary on
+        // colorPrimaryContainer is white on white in the monochrome theme.
+        val selectedTextColor = requireContext().getThemeColor(com.google.android.material.R.attr.colorOnPrimaryContainer)
         val containerColor = requireContext().getThemeColor(com.google.android.material.R.attr.colorPrimaryContainer)
-        val unselectedColor = ContextCompat.getColor(requireContext(), R.color.grey_60)
+        val unselectedColor = requireContext().getThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant)
+            .takeIf { it != 0 } ?: ContextCompat.getColor(requireContext(), R.color.grey_60)
 
         fun selectTab(selectedIdx: Int) {
             tabButtons.forEachIndexed { idx, btn ->
                 if (idx == selectedIdx) {
                     btn.setBackgroundResource(R.drawable.badge_bg_rounded)
                     btn.backgroundTintList = ColorStateList.valueOf(containerColor)
-                    btn.setTextColor(primaryColor)
+                    btn.setTextColor(selectedTextColor)
                 } else {
                     btn.setBackgroundColor(Color.TRANSPARENT)
+                    btn.backgroundTintList = null
                     btn.setTextColor(unselectedColor)
                 }
             }

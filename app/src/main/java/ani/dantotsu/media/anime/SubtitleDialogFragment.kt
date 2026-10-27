@@ -261,8 +261,11 @@ class SubtitleDialogFragment : BottomSheetDialogFragment() {
     }
 
     private fun updateTabStyles() {
-        val primaryColor = PrefManager.getVal<Int>(PrefName.PrimaryColor)
-        val selectedBgColor = ColorUtils.setAlphaComponent(primaryColor, 40)
+        // Theme pair (container + on-container) so the selected tab stays readable in every theme
+        // (a tint of the custom primary colour with that same colour as text vanished in
+        // monochrome/light themes).
+        val selectedBgColor = requireContext().getThemeColor(com.google.android.material.R.attr.colorPrimaryContainer)
+        val primaryColor = requireContext().getThemeColor(com.google.android.material.R.attr.colorOnPrimaryContainer)
         val unselectedTextColor = try {
             val themeColor = requireContext().getThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant)
             if (themeColor != 0) themeColor else ContextCompat.getColor(requireContext(), R.color.grey_60)

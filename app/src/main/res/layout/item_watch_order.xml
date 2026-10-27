@@ -65,7 +65,7 @@
                     android:paddingHorizontal="8dp"
                     android:paddingVertical="2dp"
                     android:textAllCaps="true"
-                    android:textColor="?attr/colorPrimary"
+                    android:textColor="?attr/colorOnPrimaryContainer"
                     android:textSize="11sp"
                     tools:text="MAIN STORY" />
 
