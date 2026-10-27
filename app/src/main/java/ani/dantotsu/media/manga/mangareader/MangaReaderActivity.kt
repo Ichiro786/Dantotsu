@@ -1704,6 +1704,10 @@ class MangaReaderActivity : AppCompatActivity() {
 
     private val loadingChapters = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    /** Loads [target]'s page list without re-posting it as the open chapter (WebGPU continuous). */
+    internal suspend fun loadChapterImagesForReader(target: MangaChapter): Boolean =
+        model.loadMangaChapterImages(target, media.selected!!, false)
+
     internal fun preloadChapterAndAppend(targetChapter: MangaChapter) {
         val chapterKey = targetChapter.uniqueNumber()
         if (loadingChapters.contains(chapterKey)) return

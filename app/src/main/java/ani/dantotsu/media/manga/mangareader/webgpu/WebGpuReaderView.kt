@@ -20,6 +20,10 @@ import android.os.Looper
 import ani.dantotsu.R
 import ani.dantotsu.media.manga.MangaImageFetcher
 import ani.dantotsu.snackString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import ca.mpreg.webgpuviewer.draw.TextAlign
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -49,8 +53,45 @@ class WebGpuReaderView(
     val pagedViewer: ImageView? get() = viewer as? ImageView
     val continuousViewer: ImageViewContinuous? get() = viewer as? ImageViewContinuous
 
+    /** The chapter whose page is on screen (changes while continuous mode scrolls across chapters). */
+    @Volatile
     private var currentChapter: MangaChapter? = null
+    @Volatile
     private var images: List<MangaImage> = emptyList()
+
+    /**
+     * What the viewer scrolls through, keyed by a stable "slot key". Paged mode: the bound chapter's
+     * pages at keys 0 until n. Continuous mode (Mihon-style webtoon): transitions and the pages of
+     * neighbouring chapters are added before/after as the reader nears a chapter end; keys of
+     * existing slots never change, so appending or prepending never moves what is on screen.
+     */
+    private sealed class Slot {
+        class PageSlot(val chapter: MangaChapter, val images: List<MangaImage>, val index: Int) : Slot() {
+            val image: MangaImage get() = images[index]
+        }
+
+        /**
+         * [previous] = false: end of [from], leading to [to] ("Finished / Next").
+         * [previous] = true: start of [from], preceded by [to] ("Previous / Current").
+         */
+        class TransitionSlot(val from: MangaChapter, val to: MangaChapter?, val previous: Boolean) : Slot() {
+            @Volatile
+            var failed = false
+        }
+    }
+
+    private val slots = ConcurrentHashMap<Int, Slot>()
+    @Volatile
+    private var firstKey = 0
+    @Volatile
+    private var lastKey = -1
+    /** Slot the viewer considers "current" (getPage(delta) is relative to it). */
+    @Volatile
+    private var currentKey = 0
+
+    /** Chapters (uniqueNumber) whose pages are in [slots]; and chapters whose page list is loading. */
+    private val chaptersInTimeline = ConcurrentHashMap.newKeySet<String>()
+    private val chapterLoads = ConcurrentHashMap.newKeySet<String>()
 
     private val pageCache = ConcurrentHashMap<Int, ImagePage>()
     private val loadingJobs = ConcurrentHashMap<Int, Job>()
@@ -65,12 +106,31 @@ class WebGpuReaderView(
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** Last page number reported to the activity (continuous mode reports from the render thread). */
+    /** Last slot reported to the activity (continuous mode reports from the render thread). */
     @Volatile
-    private var reportedPage = -1
+    private var reportedKey = Int.MIN_VALUE
 
-    var currentPosition: Int = 0
-        private set
+    /** Page index (0-based) within the current chapter; a transition counts as its chapter's edge. */
+    val currentPosition: Int
+        get() = when (val slot = slots[currentKey]) {
+            is Slot.PageSlot -> slot.index
+            is Slot.TransitionSlot -> if (slot.previous) 0 else (images.size - 1).coerceAtLeast(0)
+            null -> 0
+        }
+
+    private val viewerWidth: Int
+        get() = (pagedViewer?.state?.width ?: continuousViewer?.state?.width)?.takeIf { it > 0 } ?: 1080
+
+    private val viewerHeight: Int
+        get() = (pagedViewer?.state?.height ?: continuousViewer?.state?.height)?.takeIf { it > 0 } ?: 1920
+
+    private val pageBackground: Int
+        get() = when (activity.defaultSettings.backgroundColor) {
+            1 -> Color.BLACK
+            2 -> Color.DKGRAY
+            3 -> Color.WHITE
+            else -> Color.BLACK
+        }
 
     inner class ProgressPage(val pageIndex: Int) : ImagePage.Render(0, 0) {
         /** Every attempt failed: drawn as a red dot instead of the grey loading dot. */
@@ -78,18 +138,13 @@ class WebGpuReaderView(
         var failed = false
 
         override val width: Int
-            get() = (pagedViewer?.state?.width ?: continuousViewer?.state?.width)?.takeIf { it > 0 } ?: 1080
+            get() = viewerWidth
 
         override val height: Int
-            get() = (pagedViewer?.state?.height ?: continuousViewer?.state?.height)?.takeIf { it > 0 } ?: 1920
+            get() = viewerHeight
 
         override val backgroundColor: Int
-            get() = when (activity.defaultSettings.backgroundColor) {
-                1 -> Color.BLACK
-                2 -> Color.DKGRAY
-                3 -> Color.WHITE
-                else -> Color.BLACK
-            }
+            get() = pageBackground
 
         init {
             minScale = 1f
@@ -104,6 +159,74 @@ class WebGpuReaderView(
             val full = min(width, height) * 0.25f * scale
             circle(cx, cy, full / 2f, if (failed) 0x88CC4444.toInt() else 0x55888888.toInt())
         }
+    }
+
+    /** Slim "Finished: Ch X / Next: Ch Y" item between two chapters in continuous mode. */
+    private inner class TransitionPage(val slot: Slot.TransitionSlot) : ImagePage.Render(0, 0) {
+        override val width: Int
+            get() = viewerWidth
+
+        override val height: Int
+            get() = (viewerHeight * 0.3f).toInt().coerceAtLeast(1)
+
+        override val backgroundColor: Int
+            get() = pageBackground
+
+        init {
+            minScale = 1f
+            maxScale = 1f
+            homeScale = 1f
+        }
+
+        override fun render(dst: GPUTexture, x: Float, y: Float, scale: Float) {
+            fillPage(dst, x, y, scale, backgroundColor)
+            val light = backgroundColor == Color.WHITE
+            val strong = if (light) 0xFF202020.toInt() else 0xFFEEEEEE.toInt()
+            val dim = if (light) 0xFF707070.toInt() else 0xFF9E9E9E.toInt()
+            val cx = dst.width * (0.5f + scale * x)
+            val cy = dst.height * (0.5f + scale * y)
+            val size = android.util.TypedValue.applyDimension(
+                android.util.TypedValue.COMPLEX_UNIT_SP, 15f, activity.resources.displayMetrics
+            ) * scale
+            val maxWidth = width * scale * 0.86f
+            val lines = transitionLines(slot)
+            val lineHeight = size * 1.5f
+            var baseline = cy - lineHeight * (lines.size - 1) / 2f + size * 0.35f
+            for ((line, isStrong) in lines) {
+                text(
+                    dst, activity, FontFamily.Default, line, cx, baseline, size,
+                    if (isStrong) strong else dim,
+                    if (isStrong) FontWeight.Bold else FontWeight.Normal,
+                    FontStyle.Normal, TextAlign.Center, maxWidth
+                )
+                baseline += lineHeight
+            }
+        }
+    }
+
+    private fun transitionLines(slot: Slot.TransitionSlot): List<Pair<String, Boolean>> {
+        val lines = mutableListOf<Pair<String, Boolean>>()
+        val to = slot.to
+        val loading = to != null && chapterLoads.contains(to.uniqueNumber())
+        if (slot.previous) {
+            if (to != null) {
+                lines += "${activity.getString(R.string.transition_previous)} ${activity.getChapterDisplayTitle(to)}" to false
+            } else {
+                lines += activity.getString(R.string.transition_no_previous) to false
+            }
+            lines += "${activity.getString(R.string.transition_current)} ${activity.getChapterDisplayTitle(slot.from)}" to true
+            if (loading) lines += activity.getString(R.string.transition_loading_previous) to false
+        } else {
+            lines += "${activity.getString(R.string.transition_finished)} ${activity.getChapterDisplayTitle(slot.from)}" to false
+            if (to != null) {
+                lines += "${activity.getString(R.string.transition_next)} ${activity.getChapterDisplayTitle(to)}" to true
+                if (loading) lines += activity.getString(R.string.transition_loading_next) to false
+            } else {
+                lines += activity.getString(R.string.transition_no_next) to true
+            }
+        }
+        if (slot.failed && !loading) lines += activity.getString(R.string.transition_load_failed) to false
+        return lines
     }
 
     init {
@@ -133,19 +256,20 @@ class WebGpuReaderView(
                 // after scrolling past page 1 the viewer was handed page 1 again, so the strip
                 // jumped back and the counter stayed at 1/N.
                 onPageChange = { delta ->
-                    val target = (currentPosition + delta).coerceIn(0, (images.size - 1).coerceAtLeast(0))
-                    if (target != currentPosition) {
-                        currentPosition = target
+                    val target = (currentKey + delta).coerceIn(firstKey, lastKey.coerceAtLeast(firstKey))
+                    if (target != currentKey) {
+                        currentKey = target
                         mainHandler.post { onCurrentPageChanged(target, target) }
                     }
                 }
                 // Observation only (called on the render thread): the deepest page read through
                 // drives the page counter / progress, never the page provider.
                 onViewport = { readThrough ->
-                    val idx = pageCache.entries.firstOrNull { it.value === readThrough }?.key
-                    val shown = max(idx ?: currentPosition, currentPosition)
-                    if (shown != reportedPage) {
-                        mainHandler.post { onCurrentPageChanged(currentPosition, shown) }
+                    val key = pageCache.entries.firstOrNull { it.value === readThrough }?.key
+                    val center = currentKey
+                    val shown = max(key ?: center, center)
+                    if (shown != reportedKey) {
+                        mainHandler.post { onCurrentPageChanged(center, shown) }
                     }
                 }
             }
@@ -162,9 +286,9 @@ class WebGpuReaderView(
                     getPageForDelta(delta)
                 }
                 onPageChange = { delta ->
-                    val target = currentPosition + delta
-                    if (target in images.indices) {
-                        currentPosition = target
+                    val target = currentKey + delta
+                    if (target in firstKey..lastKey) {
+                        currentKey = target
                         mainHandler.post { onCurrentPageChanged(target, target) }
                     }
                 }
@@ -172,21 +296,124 @@ class WebGpuReaderView(
         }
     }
 
-    /** Main thread: report the page to the reader and keep the decode window around [center]. */
+    /**
+     * Main thread: report the page (and, in continuous mode, a chapter change) to the reader and
+     * keep the decode window around [center]. [onChapterScrolledTo] updates the chapter title,
+     * counter, seekbar and saves progress (incognito / save-progress settings respected there).
+     */
     private fun onCurrentPageChanged(center: Int, shown: Int) {
-        val chap = currentChapter ?: return
-        if (images.isEmpty()) return
-        val page = shown.coerceIn(0, images.size - 1)
-        if (page != reportedPage) {
-            reportedPage = page
-            activity.onChapterScrolledTo(chap, page + 1, images.size)
-            checkPreloadBoundaries(page)
+        if (activity.isFinishing || activity.isDestroyed) return
+        if (shown != reportedKey) {
+            when (val slot = slots[shown]) {
+                is Slot.PageSlot -> {
+                    reportedKey = shown
+                    if (currentChapter?.uniqueNumber() != slot.chapter.uniqueNumber()) {
+                        currentChapter = slot.chapter
+                        images = slot.images
+                    }
+                    activity.onChapterScrolledTo(slot.chapter, slot.index + 1, slot.images.size)
+                    checkPreloadBoundaries(slot)
+                }
+                is Slot.TransitionSlot -> {
+                    reportedKey = shown
+                    slot.to?.let { ensureChapterInTimeline(it, forward = !slot.previous) }
+                }
+                null -> {}
+            }
         }
         preloadAround(center)
     }
 
+    private fun neighbourChapter(chap: MangaChapter, offset: Int): MangaChapter? {
+        val idx = activity.chaptersArr.indexOf(chap.uniqueNumber())
+        if (idx == -1) return null
+        return activity.chaptersArr.getOrNull(idx + offset)?.let { activity.chapters[it] }
+    }
+
+    /** Continuous mode: loads [chap]'s page list if needed and splices it into the timeline. */
+    private fun ensureChapterInTimeline(chap: MangaChapter, forward: Boolean) {
+        if (!isContinuous) return
+        val key = chap.uniqueNumber()
+        if (chaptersInTimeline.contains(key)) return
+        if (chap.images().isNotEmpty()) {
+            insertChapter(chap, forward)
+            return
+        }
+        if (!chapterLoads.add(key)) return
+        val gen = generation
+        invalidateTransitions()
+        activity.lifecycleScope.launch(Dispatchers.IO) {
+            val ok = try {
+                activity.loadChapterImagesForReader(chap)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Logger.log("WebGpuReaderView: loading chapter ${chap.number} failed: $e")
+                false
+            } finally {
+                chapterLoads.remove(key)
+            }
+            withContext(Dispatchers.Main) {
+                if (gen != generation) return@withContext
+                if (ok && chap.images().isNotEmpty()) {
+                    insertChapter(chap, forward)
+                } else {
+                    slots.values.forEach {
+                        if (it is Slot.TransitionSlot && it.to?.uniqueNumber() == key) it.failed = true
+                    }
+                }
+                invalidateTransitions()
+                invalidate()
+            }
+        }
+    }
+
+    /** Main thread. Appends after the last slot / prepends before the first one; never renumbers. */
+    private fun insertChapter(chap: MangaChapter, forward: Boolean) {
+        val key = chap.uniqueNumber()
+        if (chaptersInTimeline.contains(key)) return
+        val chapImages = chap.images()
+        if (chapImages.isEmpty()) return
+        if (forward) {
+            val edge = slots[lastKey] as? Slot.TransitionSlot ?: return
+            if (edge.previous || edge.to?.uniqueNumber() != key) return
+            edge.failed = false
+            var k = lastKey
+            chapImages.indices.forEach { i -> slots[++k] = Slot.PageSlot(chap, chapImages, i) }
+            slots[++k] = Slot.TransitionSlot(chap, neighbourChapter(chap, 1), previous = false)
+            chaptersInTimeline.add(key)
+            lastKey = k
+        } else {
+            val edge = slots[firstKey] as? Slot.TransitionSlot ?: return
+            if (!edge.previous || edge.to?.uniqueNumber() != key) return
+            edge.failed = false
+            var k = firstKey
+            chapImages.indices.reversed().forEach { i -> slots[--k] = Slot.PageSlot(chap, chapImages, i) }
+            slots[--k] = Slot.TransitionSlot(chap, neighbourChapter(chap, -1), previous = true)
+            chaptersInTimeline.add(key)
+            firstKey = k
+        }
+        invalidateTransitions()
+        preloadAround(currentKey)
+        invalidate()
+    }
+
+    private fun invalidateTransitions() {
+        pageCache.values.forEach { if (it is TransitionPage) it.invalidate() }
+    }
+
+    private fun retryFailedChapters() {
+        slots.values.forEach { slot ->
+            if (slot is Slot.TransitionSlot && slot.failed) {
+                slot.failed = false
+                slot.to?.let { ensureChapterInTimeline(it, forward = !slot.previous) }
+            }
+        }
+    }
+
     /** Retries every page whose load failed (after a tap, or when the network is back). */
     fun retryFailedPages() {
+        retryFailedChapters()
         if (failedPages.isEmpty()) return
         val toRetry = failedPages.toList()
         failedPages.clear()
@@ -206,24 +433,51 @@ class WebGpuReaderView(
     }
 
     fun bind(chapter: MangaChapter, initialPage: Int) {
+        clearCache()
+        slots.clear()
+        chaptersInTimeline.clear()
         currentChapter = chapter
         images = chapter.images()
-        currentPosition = (initialPage - 1).coerceIn(0, (images.size - 1).coerceAtLeast(0))
-        reportedPage = currentPosition
-        clearCache()
-        if (currentPosition in images.indices) {
-            pageCache[currentPosition] = ProgressPage(currentPosition)
-            loadPage(currentPosition)
+        images.indices.forEach { i -> slots[i] = Slot.PageSlot(chapter, images, i) }
+        firstKey = 0
+        lastKey = images.size - 1
+        if (isContinuous) {
+            chaptersInTimeline.add(chapter.uniqueNumber())
+            slots[-1] = Slot.TransitionSlot(chapter, neighbourChapter(chapter, -1), previous = true)
+            slots[images.size] = Slot.TransitionSlot(chapter, neighbourChapter(chapter, 1), previous = false)
+            firstKey = -1
+            lastKey = images.size
         }
-        preloadAround(currentPosition)
+        val start = (initialPage - 1).coerceIn(0, (images.size - 1).coerceAtLeast(0))
+        currentKey = if (images.isEmpty()) firstKey.coerceAtMost(lastKey).coerceAtLeast(0) else start
+        reportedKey = currentKey
+        if (slots[currentKey] is Slot.PageSlot) {
+            pageCache[currentKey] = ProgressPage(start)
+            loadPage(currentKey)
+        }
+        preloadAround(currentKey)
+        (slots[currentKey] as? Slot.PageSlot)?.let { checkPreloadBoundaries(it) }
         invalidate()
     }
 
+    /** Key of page [pageIndex] of the current chapter (paged mode: the index itself). */
+    private fun keyForPage(pageIndex: Int): Int {
+        val chapKey = currentChapter?.uniqueNumber()
+        val current = slots[currentKey]
+        if (current is Slot.PageSlot && current.chapter.uniqueNumber() == chapKey) {
+            return currentKey + (pageIndex - current.index)
+        }
+        return slots.entries.firstOrNull { (_, s) ->
+            s is Slot.PageSlot && s.index == pageIndex && s.chapter.uniqueNumber() == chapKey
+        }?.key ?: pageIndex
+    }
+
     fun scrollToPage(pageNumber: Int) {
-        val target = (pageNumber - 1).coerceIn(0, (images.size - 1).coerceAtLeast(0))
-        val delta = target - currentPosition
-        currentPosition = target
-        preloadAround(currentPosition)
+        val targetIndex = (pageNumber - 1).coerceIn(0, (images.size - 1).coerceAtLeast(0))
+        val target = keyForPage(targetIndex)
+        val delta = target - currentKey
+        currentKey = target
+        preloadAround(currentKey)
         if (!isContinuous) {
             pagedViewer?.state?.animatePageTurn(if (isReversed) -delta else delta)
         } else {
@@ -253,31 +507,48 @@ class WebGpuReaderView(
     }
 
     private fun getPageForDelta(delta: Int): ImagePage? {
-        val targetIdx = currentPosition + delta
-        if (targetIdx !in images.indices) return null
+        val key = currentKey + delta
+        val slot = slots[key] ?: return null
 
-        val cached = pageCache[targetIdx]
+        val cached = pageCache[key]
         if (cached != null) return cached
 
-        val placeholder = ProgressPage(targetIdx)
-        pageCache[targetIdx] = placeholder
-        loadPage(targetIdx)
-        return placeholder
+        return when (slot) {
+            is Slot.PageSlot -> {
+                val placeholder = ProgressPage(slot.index)
+                pageCache[key] = placeholder
+                loadPage(key)
+                placeholder
+            }
+            is Slot.TransitionSlot -> TransitionPage(slot).also { pageCache[key] = it }
+        }
     }
 
     private fun preloadAround(center: Int) {
         // Short pages can put more than 3 on screen below the current one.
         val below = max(3, (continuousViewer?.state?.pagesBelow ?: 0) + 2)
         val range = (center - 2)..(center + below)
-        for (i in range) {
-            if (i in images.indices && !pageCache.containsKey(i)) {
-                loadPage(i)
+        for (k in range) {
+            if (slots[k] is Slot.PageSlot && !pageCache.containsKey(k)) {
+                loadPage(k)
             }
         }
         trimCache(center)
     }
 
-    private fun checkPreloadBoundaries(pos: Int) {
+    private fun checkPreloadBoundaries(slot: Slot.PageSlot) {
+        if (isContinuous) {
+            // Mihon-style: fetch the neighbouring chapter's page list while the last/first
+            // pages are still being read, so the strip flows straight into it.
+            if (slot.images.size - (slot.index + 1) <= PRELOAD_CHAPTER_PAGES) {
+                neighbourChapter(slot.chapter, 1)?.let { ensureChapterInTimeline(it, forward = true) }
+            }
+            if (slot.index < PRELOAD_CHAPTER_PAGES) {
+                neighbourChapter(slot.chapter, -1)?.let { ensureChapterInTimeline(it, forward = false) }
+            }
+            return
+        }
+        val pos = slot.index
         if (images.isEmpty()) return
         if (images.size - (pos + 1) <= 5) {
             val nextIdx = activity.currentChapterIndex + 1
@@ -297,10 +568,12 @@ class WebGpuReaderView(
         }
     }
 
+    /** Loads the page in slot [index] (a slot key; equals the page index in paged mode). */
     private fun loadPage(index: Int) {
         val currentEntry = pageCache[index]
         if (currentEntry != null && currentEntry !is ProgressPage) return
-        val img = images.getOrNull(index) ?: return
+        val pageSlot = slots[index] as? Slot.PageSlot ?: return
+        val img = pageSlot.image
         val gen = generation
 
         synchronized(loadingJobs) {
@@ -346,9 +619,9 @@ class WebGpuReaderView(
                         failedPages.add(index)
                         val placeholder = pageCache[index] as? ProgressPage
                         placeholder?.failed = true
-                        if (abs(index - currentPosition) <= 1) {
+                        if (abs(index - currentKey) <= 1) {
                             withContext(Dispatchers.Main) {
-                                snackString(activity.getString(R.string.reader_page_failed_tap_retry, index + 1))
+                                snackString(activity.getString(R.string.reader_page_failed_tap_retry, pageSlot.index + 1))
                             }
                         }
                     }
@@ -475,5 +748,7 @@ class WebGpuReaderView(
     private companion object {
         const val MAX_ATTEMPTS = 3
         const val RETRY_DELAY_MS = 800L
+        /** Start loading the next/previous chapter this many pages before its edge. */
+        const val PRELOAD_CHAPTER_PAGES = 3
     }
 }
