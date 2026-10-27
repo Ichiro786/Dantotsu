@@ -24,7 +24,15 @@ data class ImageData(
     val page: Page,
     val source: HttpSource
 ) {
+    /** Like Mihon, a failed page (expired/signed url) gets its url refreshed from the source once. */
     suspend fun fetchAndProcessImage(
+        page: Page,
+        httpSource: HttpSource
+    ): Bitmap? = MangaImageFetcher.withPageRefresh(page, httpSource) {
+        fetchAndProcessImageOnce(page, httpSource)
+    }
+
+    private suspend fun fetchAndProcessImageOnce(
         page: Page,
         httpSource: HttpSource
     ): Bitmap? {

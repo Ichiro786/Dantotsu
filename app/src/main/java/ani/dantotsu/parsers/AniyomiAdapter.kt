@@ -589,6 +589,8 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
             // Page order is the list order (Mihon ignores Page.index), so re-index it.
             val reIndexedPages =
                 res.mapIndexed { index, page -> Page(index, page.url, page.imageUrl, page.uri) }
+            // Lets an expired image url be refreshed from this chapter's page list later.
+            ani.dantotsu.media.manga.MangaImageFetcher.registerChapterPages(reIndexedPages, sChapter, source)
 
             // Image urls that need a request of their own (imageUrlParse) are no longer resolved
             // for every page before the reader opens: like Mihon, they are resolved when the page
