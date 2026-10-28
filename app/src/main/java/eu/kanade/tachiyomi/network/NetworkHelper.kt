@@ -107,7 +107,7 @@ private fun setupSocks5Proxy() {
                 }
             }
             .addInterceptor(UncaughtExceptionInterceptor())
-            .addInterceptor(UserAgentInterceptor(::defaultUserAgentProvider))
+            .addInterceptor(UserAgentInterceptor { Companion.defaultUserAgentProvider() })
             .addInterceptor(AnilistInterceptor())
 
         class ConsoleLogger : HttpLoggingInterceptor.Logger {
@@ -124,7 +124,7 @@ private fun setupSocks5Proxy() {
         }
 
         builder.addInterceptor(
-            CloudflareInterceptor(context, cookieJar, ::defaultUserAgentProvider),
+            CloudflareInterceptor(context, cookieJar) { Companion.defaultUserAgentProvider() },
         )
 
         when (PrefManager.getVal<Int>(PrefName.DohProvider)) {
@@ -178,7 +178,17 @@ private fun setupSocks5Proxy() {
         responseParser = Mapper
     )
 
+    /**
+     * Instance form used by extensions: Aniyomi/Mihon extensions are compiled against
+     * `network.defaultUserAgentProvider()` (a member of NetworkHelper), so without this an
+     * extension that builds its own headers or client throws NoSuchMethodError.
+     */
+    fun defaultUserAgentProvider(): String = Companion.defaultUserAgentProvider()
+
     companion object {
-        fun defaultUserAgentProvider() = PrefManager.getVal<String>(PrefName.DefaultUserAgent)
+        // Trimmed like Mihon: a stray newline/space pasted into the setting makes OkHttp
+        // reject the header ("Unexpected char") on every request.
+        fun defaultUserAgentProvider(): String =
+            PrefManager.getVal<String>(PrefName.DefaultUserAgent).trim()
     }
 }

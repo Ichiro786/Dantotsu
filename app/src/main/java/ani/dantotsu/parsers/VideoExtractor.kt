@@ -19,6 +19,32 @@ abstract class VideoExtractor : Serializable {
         get() = server.video?.preferred == true || videos.any { it.preferred }
 
     /**
+     * OkHttp client of the extension source this stream came from. The player builds its
+     * data source on it (with the disk cache removed) so the source's cookies, Cloudflare
+     * handling, DoH and interceptors apply to the stream too. Null for non-extension streams.
+     */
+    @Transient
+    var sourceClient: okhttp3.OkHttpClient? = null
+
+    /** When the stream links were last fetched/resolved (ms since epoch), 0 = unknown. */
+    @Transient
+    var resolvedAtMs: Long = 0L
+
+    /** True while the video links still need the source's resolveVideo before they can play. */
+    open val needsResolve: Boolean
+        get() = false
+
+    /** True for a placeholder (e.g. a lazy hoster) whose videos have not been fetched yet. */
+    open val isPlaceholder: Boolean
+        get() = false
+
+    /**
+     * Fetches fresh links for this same server (expired/blocked links). Returns true when
+     * [videos] now holds fresh links. Default: not supported.
+     */
+    open suspend fun refreshLinks(): Boolean = false
+
+    /**
      * Extracts videos & subtitles from the `embed`
      *
      * returns a container containing both videos & subtitles (optional)
@@ -143,6 +169,11 @@ data class Video(
      * **/
     val drm: DrmInfo? = null,
     val preferred: Boolean = false,
+    /**
+     * Container mime type forced by the extension (e.g. its mpv args say the stream is
+     * MPEG-TS behind a misleading url). Null = detect.
+     * **/
+    val mimeTypeHint: String? = null,
 ) : Serializable {
 
     constructor(

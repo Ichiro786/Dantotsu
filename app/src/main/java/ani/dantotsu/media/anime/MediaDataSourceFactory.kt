@@ -5,39 +5,82 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cronet.CronetDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import ani.dantotsu.parsers.StreamHeaders
+import ani.dantotsu.settings.saving.PrefManager
+import ani.dantotsu.settings.saving.PrefName
 import ani.dantotsu.util.Logger
 import okhttp3.OkHttpClient
+import org.chromium.net.CronetEngine
 import org.chromium.net.CronetProvider
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
- * Multi-tier HTTP DataSource resolver for Media3 / ExoPlayer.
+ * HTTP DataSource for Media3 / ExoPlayer.
  *
- *   Tier 1 (GMS devices) — [CronetDataSource] via Google Play Services [CronetProvider].
- *                          Provides HTTP/3 (QUIC) + HTTP/2. ~90 KB APK footprint (glue only;
- *                          the actual Chromium engine is already on the device via Play Services).
- *                          On F-Droid builds [CronetProvider] class is absent at runtime
- *                          → caught via [runCatching] → falls through cleanly.
+ * Default: [OkHttpDataSource] on the extension source's client (see DantotsuPlayerManager),
+ * so the source's cookies, Cloudflare clearance, DoH and interceptors apply to the stream.
+ * This matters in India, where ISP DNS blocks of anime CDNs are common and only DoH gets
+ * through.
  *
- *   Tier 2 (fallback)    — [OkHttpDataSource] (existing HTTP/2 baseline). Always available.
+ * Opt-in ([PrefName.UseCronet]): [CronetDataSource] through the Play Services Cronet
+ * provider (HTTP/3). Cronet does not see the OkHttp cookie jar, DoH or interceptors, which
+ * is why it is off by default. One engine is shared by every player and created lazily on a
+ * background thread (engine creation loads the provider and can take hundreds of ms); until
+ * it is ready, streams use OkHttp. On F-Droid builds the provider is absent and creation
+ * fails quietly.
  *
- * Localhost/loopback streams always use the OkHttp factory (Tier 2) so that the
- * existing gzip-decompression and Accept-Encoding interceptors remain active for
- * the NanoHTTPD torrent proxy.
+ * Localhost/loopback streams (torrent server, extension HttpServer, local proxies) always
+ * use OkHttp.
  */
 @UnstableApi
 object MediaDataSourceFactory {
 
+    @Volatile
+    private var cronetEngine: CronetEngine? = null
+
+    @Volatile
+    private var cronetInitStarted = false
+
+    private val cronetExecutor: ExecutorService by lazy { Executors.newFixedThreadPool(4) }
+
+    /** Starts creating the shared Cronet engine in the background when the user opted in. */
+    fun warmUpCronet(context: Context) {
+        if (!PrefManager.getVal<Boolean>(PrefName.UseCronet)) return
+        synchronized(this) {
+            if (cronetInitStarted) return
+            cronetInitStarted = true
+        }
+        val appContext = context.applicationContext
+        Thread({
+            cronetEngine = try {
+                val provider = CronetProvider.getAllProviders(appContext).firstOrNull { p ->
+                    p.isEnabled && p.name != CronetProvider.PROVIDER_NAME_FALLBACK
+                }
+                if (provider == null) {
+                    Logger.log("DataSource: no active GMS Cronet provider found")
+                    null
+                } else {
+                    provider.createBuilder()
+                        .enableQuic(true)
+                        .enableHttp2(true)
+                        .build()
+                        .also { Logger.log("DataSource: Cronet engine ready (${provider.name})") }
+                }
+            } catch (e: Throwable) {
+                // NoClassDefFoundError on F-Droid, or runtime failure on a GMS device.
+                Logger.log("DataSource: GMS Cronet unavailable — ${e.message}")
+                null
+            }
+        }, "cronet-init").start()
+    }
+
     /**
-     * Resolves and returns the best available [HttpDataSource.Factory] for the
-     * given [context] and request [headers].
+     * Returns the [HttpDataSource.Factory] for a stream.
      *
-     * @param context      Android context (used for Cronet provider lookup).
-     * @param headers      Default request headers to set on the factory.
-     * @param okHttpClient The OkHttpClient used as the Tier 2 fallback.
-     * @param isLocalhost  When true, skips QUIC tiers and returns OkHttp directly.
-     *                     QUIC over loopback is undefined and the NanoHTTPD proxy
-     *                     requires the OkHttp interceptor chain.
+     * @param headers      Request headers (already merged: defaults -> source -> video).
+     * @param okHttpClient Client for the OkHttp path (the source's client, cache removed).
+     * @param isLocalhost  Loopback stream: always OkHttp.
      */
     fun resolveHttpFactory(
         context: Context,
@@ -45,68 +88,46 @@ object MediaDataSourceFactory {
         okHttpClient: OkHttpClient,
         isLocalhost: Boolean = false,
     ): HttpDataSource.Factory {
-        if (isLocalhost) {
-            Logger.log("DataSource: localhost stream — using OkHttp (HTTP/2, QUIC bypassed)")
-            return buildOkHttpFactory(okHttpClient, headers)
+        if (!isLocalhost && PrefManager.getVal<Boolean>(PrefName.UseCronet)) {
+            val engine = cronetEngine
+            if (engine != null) {
+                return try {
+                    CronetDataSource.Factory(engine, cronetExecutor).apply {
+                        setDefaultRequestProperties(StreamHeaders.without(headers, "User-Agent"))
+                        StreamHeaders.get(headers, "User-Agent")?.let { setUserAgent(it) }
+                    }.also { Logger.log("DataSource: using Cronet (HTTP/3 + HTTP/2)") }
+                } catch (e: Throwable) {
+                    Logger.log("DataSource: Cronet factory failed — ${e.message}")
+                    buildOkHttpFactory(okHttpClient, headers)
+                }
+            }
+            warmUpCronet(context)
         }
-
-        // Tier 1 — GMS Cronet (absent on F-Droid; caught safely)
-        tryCronetProvider(context, headers)?.let { return it }
-
-        // Tier 2 — OkHttp (HTTP/2, always available)
-        Logger.log("DataSource: using OkHttp (HTTP/2)")
         return buildOkHttpFactory(okHttpClient, headers)
     }
 
-    // -------------------------------------------------------------------------
-    // Tier 1 — GMS CronetProvider
-    // -------------------------------------------------------------------------
-
     /**
-     * Attempts to build a [CronetDataSource.Factory] via the GMS Cronet provider.
-     *
-     * Catches [Throwable] (not just [Exception]) because on F-Droid builds the
-     * [CronetProvider] class is absent → [NoClassDefFoundError] (a [LinkageError]).
+     * Removes the extension's request rate limiters (Tachiyomi `rateLimit`/
+     * `rateLimitHost` interceptors) from a client used for media: they are meant for API
+     * and page requests, and would otherwise throttle HLS segment downloads to a few per
+     * second and stall playback.
      */
-    private fun tryCronetProvider(
-        context: Context,
-        headers: Map<String, String>,
-    ): HttpDataSource.Factory? = runCatching {
-        val providers = CronetProvider.getAllProviders(context)
-        val provider = providers.firstOrNull { p ->
-            p.isEnabled && p.name != CronetProvider.PROVIDER_NAME_FALLBACK
-        } ?: run {
-            Logger.log("DataSource: no active GMS Cronet provider found")
-            return@runCatching null
-        }
-        val engine = provider.createBuilder()
-            .enableQuic(true)
-            .enableHttp2(true)
-            .build()
-        CronetDataSource.Factory(engine, Executors.newCachedThreadPool())
-            .apply { setDefaultRequestProperties(headers) }
-            .also { Logger.log("DataSource: using GMS Cronet '${provider.name}' (HTTP/3 + HTTP/2)") }
-    }.getOrElse { e ->
-        // NoClassDefFoundError on F-Droid, or runtime failure on GMS device — safe to swallow.
-        Logger.log("DataSource: GMS Cronet unavailable — ${e.message}")
-        null
+    fun dropRateLimiters(builder: OkHttpClient.Builder): OkHttpClient.Builder = builder.apply {
+        interceptors().removeAll { it.javaClass.name.contains("RateLimit", ignoreCase = true) }
+        networkInterceptors().removeAll { it.javaClass.name.contains("RateLimit", ignoreCase = true) }
     }
 
-    // -------------------------------------------------------------------------
-    // Tier 2 (also used directly by DrmDownloader for license requests)
-    // -------------------------------------------------------------------------
-
     /**
-     * Builds an [OkHttpDataSource.Factory] with the supplied [headers].
-     * DRM license fetches always use this path (they need the OkHttp cookie /
-     * CloudFlare interceptor chain and are not latency-critical).
+     * Builds an [OkHttpDataSource.Factory] with the supplied [headers]. The User-Agent is set
+     * once through setUserAgent (it is not also a default request property), so exactly one
+     * User-Agent header goes out.
      */
     fun buildOkHttpFactory(
         okHttpClient: OkHttpClient,
         headers: Map<String, String>,
     ): OkHttpDataSource.Factory =
         OkHttpDataSource.Factory(okHttpClient).apply {
-            setDefaultRequestProperties(headers)
-            headers["User-Agent"]?.let { setUserAgent(it) }
+            setDefaultRequestProperties(StreamHeaders.without(headers, "User-Agent"))
+            StreamHeaders.get(headers, "User-Agent")?.let { setUserAgent(it) }
         }
 }

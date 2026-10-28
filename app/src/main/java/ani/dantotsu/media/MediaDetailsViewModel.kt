@@ -813,37 +813,91 @@ class MediaDetailsViewModel : ViewModel() {
     private var episode = MutableLiveData<Episode?>(null)
     fun getEpisode(): LiveData<Episode?> = episode
 
-    suspend fun loadEpisodeVideos(ep: Episode, i: Int, post: Boolean = true) {
+    /**
+     * One in-flight server load per episode/source: the next-episode prefetch, the Next
+     * button and the selector used to each start their own extension requests for the same
+     * episode. A second caller now joins the running load (and gets the servers found so far
+     * replayed to its callback) instead of starting another one.
+     */
+    private val videoLoadJobs = ConcurrentHashMap<String, Deferred<Boolean>>()
+
+    private suspend fun sharedVideoLoad(key: String, block: suspend () -> Boolean): Boolean {
+        val job = videoLoadJobs.compute(key) { _, running ->
+            if (running != null && !running.isCompleted) running
+            else viewModelScope.async(Dispatchers.IO) { block() }
+        }!!
+        return try {
+            job.await()
+        } catch (e: CancellationException) {
+            // our caller was cancelled -> rethrow; the shared load was cancelled -> no result
+            currentCoroutineContext().ensureActive()
+            false
+        } catch (e: Exception) {
+            Logger.log("Video server load failed: ${e.message}")
+            false
+        } finally {
+            if (job.isCompleted) videoLoadJobs.remove(key, job)
+        }
+    }
+
+    suspend fun loadEpisodeVideos(
+        ep: Episode,
+        i: Int,
+        post: Boolean = true,
+        resolveLazily: Boolean = false,
+    ) {
         val link = ep.link ?: return
         if (!ep.allStreams || ep.extractors.isNullOrEmpty()) {
-            val existingExtractors = ep.extractors?.toMutableList() ?: mutableListOf()
-            // filled from several IO threads (asyncMap) while the UI reads it
-            val list: MutableList<VideoExtractor> = CopyOnWriteArrayList()
-            ep.extractors = list
-            watchSources?.get(i)?.apply {
-                if (!post && !allowsPreloading) return@apply
-                ep.sEpisode?.let {
-                    loadByVideoServers(link, ep.extra, it) { extractor ->
-                        if (extractor.videos.isNotEmpty()) {
-                            list.add(extractor)
-                            ep.extractorCallback?.invoke(extractor)
-                        }
-                    }
-                }
-                ep.extractorCallback = null
-                if (list.isNotEmpty())
-                    ep.allStreams = true
-                else if (existingExtractors.isNotEmpty())
-                    ep.extractors = existingExtractors
+            val key = "all|$i|$link"
+            val joining = videoLoadJobs[key]?.isCompleted == false
+            if (joining) {
+                // replay what the running load already found to this caller's callback
+                ep.extractors?.toList()?.forEach { ep.extractorCallback?.invoke(it) }
+            }
+            sharedVideoLoad(key) {
+                loadEpisodeVideosNow(ep, link, i, post, resolveLazily)
+                true
             }
         }
-
 
         if (post) {
             episode.postValue(ep)
             MainScope().launch(Dispatchers.Main) {
                 episode.value = null
             }
+        }
+    }
+
+    private suspend fun loadEpisodeVideosNow(
+        ep: Episode,
+        link: String,
+        i: Int,
+        post: Boolean,
+        resolveLazily: Boolean,
+    ) {
+        if (ep.allStreams && !ep.extractors.isNullOrEmpty()) return
+        val existingExtractors = ep.extractors?.toMutableList() ?: mutableListOf()
+        // filled from several IO threads while the UI reads it
+        val list: MutableList<VideoExtractor> = CopyOnWriteArrayList()
+        ep.extractors = list
+        watchSources?.get(i)?.apply {
+            if (!post && !allowsPreloading) {
+                ep.extractors = existingExtractors
+                return@apply
+            }
+            ep.sEpisode?.let {
+                loadByVideoServers(link, ep.extra, it, resolveLazily) { extractor ->
+                    if (extractor.videos.isNotEmpty()) {
+                        list.add(extractor)
+                        ep.extractorCallback?.invoke(extractor)
+                    }
+                }
+            }
+            ep.extractorCallback = null
+            if (list.isNotEmpty())
+                ep.allStreams = true
+            else if (existingExtractors.isNotEmpty())
+                ep.extractors = existingExtractors
         }
     }
 
@@ -924,33 +978,29 @@ class MediaDetailsViewModel : ViewModel() {
         val link = ep.link ?: return false
 
         if (ep.extractors?.find { it.server.name == server || it.isPreferred } == null) {
-            Log.d("AnimeDownloader", "Loading Video Server for episode: ${ep.number}, selected server: $server")
-            if(ep.extractors == null){
-                ep.extractors = mutableListOf(watchSources?.get(selected.sourceIndex)?.let {
-                    selected.sourceIndex = selected.sourceIndex
-                    if (!post && !it.allowsPreloading) null
-                    else ep.sEpisode?.let { it1 ->
-                        it.loadSingleVideoServer(
-                            server, link, ep.extra,
-                            it1, post
-                        )
+            val sourceIndex = selected.sourceIndex
+            val loaded = sharedVideoLoad("one|$sourceIndex|$link|$server") {
+                if (ep.extractors?.find { it.server.name == server || it.isPreferred } != null) {
+                    return@sharedVideoLoad true
+                }
+                Log.d("AnimeDownloader", "Loading Video Server for episode: ${ep.number}, selected server: $server")
+                val parser = watchSources?.get(sourceIndex) ?: return@sharedVideoLoad false
+                if (!post && !parser.allowsPreloading) return@sharedVideoLoad false
+                val sEpisode = ep.sEpisode ?: return@sharedVideoLoad false
+                val extractor = parser.loadSingleVideoServer(server, link, ep.extra, sEpisode, post)
+                    ?: return@sharedVideoLoad false
+                synchronized(ep) {
+                    val current = ep.extractors
+                    if (current == null) {
+                        ep.extractors = CopyOnWriteArrayList(listOf(extractor))
+                    } else {
+                        current.add(extractor)
                     }
-                } ?: return false)
+                }
+                ep.allStreams = false
+                true
             }
-            else{
-                ep.extractors!!.add(watchSources?.get(selected.sourceIndex)?.let {
-                    selected.sourceIndex = selected.sourceIndex
-                    if (!post && !it.allowsPreloading) null
-                    else ep.sEpisode?.let { it1 ->
-                        it.loadSingleVideoServer(
-                            server, link, ep.extra,
-                            it1, post
-                        )
-                    }
-                } ?: return false)
-            }
-            //ep.extractors?.forEach { Log.d("AnimeDownloader", "Extractor episode ${ep.number}: ${it.server.name}") }
-            ep.allStreams = false
+            if (!loaded) return false
         }
         if (post) {
             episode.postValue(ep)

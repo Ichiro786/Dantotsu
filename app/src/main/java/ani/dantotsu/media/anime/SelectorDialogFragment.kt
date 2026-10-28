@@ -51,7 +51,9 @@ import ani.dantotsu.navBarHeight
 import ani.dantotsu.others.Download.download
 import ani.dantotsu.parsers.Subtitle
 import ani.dantotsu.parsers.Video
+import ani.dantotsu.parsers.LazyHosterExtractor
 import ani.dantotsu.parsers.VideoExtractor
+import ani.dantotsu.parsers.VideoServerPassthrough
 import ani.dantotsu.parsers.VideoType
 import ani.dantotsu.setSafeOnClickListener
 import ani.dantotsu.settings.SettingsAddonActivity
@@ -205,7 +207,11 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                             }
                         }
                         scope.launch(Dispatchers.IO) {
-                            model.loadEpisodeVideos(ep, media!!.selected!!.sourceIndex)
+                            model.loadEpisodeVideos(
+                                ep,
+                                media!!.selected!!.sourceIndex,
+                                resolveLazily = isDownloadMenu != true
+                            )
                             withContext(Dispatchers.Main) {
                                 if (_binding == null || !isAdded) return@withContext
                                 binding.selectorProgressBar.visibility = View.GONE
@@ -284,7 +290,11 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                         }
                     }
                     scope.launch(Dispatchers.IO) {
-                        model.loadEpisodeVideos(ep, media!!.selected!!.sourceIndex)
+                        model.loadEpisodeVideos(
+                                ep,
+                                media!!.selected!!.sourceIndex,
+                                resolveLazily = isDownloadMenu != true
+                            )
                         withContext(Dispatchers.Main) {
                             if (_binding == null || !isAdded || isCancelled) return@withContext
                             if (!hasStarted) {
@@ -665,10 +675,91 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
         }
     }
 
+    /** Servers that failed to resolve/load in this dialog; skipped when picking the next best. */
+    private val failedServers = mutableSetOf<String>()
+
+    /**
+     * The picked server may only be a placeholder: a lazy hoster that has not been fetched,
+     * or a video listed before the source resolved it. Fetch/resolve just that one, then
+     * continue; when it fails, fall through to the next best server.
+     * Returns true when it took over (startExoplayer is called again when done).
+     */
+    private fun prepareSelected(media: Media): Boolean {
+        val ep = episode ?: return false
+        val chosen = ep.extractors?.find { it.server.name == ep.selectedExtractor } ?: return false
+        if (chosen !is LazyHosterExtractor && !chosen.needsResolve) return false
+        _binding?.selectorProgressBar?.visibility = View.VISIBLE
+        scope.launch {
+            val replacement: List<VideoExtractor> = withContext(Dispatchers.IO) {
+                try {
+                    when (chosen) {
+                        is LazyHosterExtractor -> chosen.loadHoster()
+                        is VideoServerPassthrough -> if (chosen.resolveNow()) listOf(chosen) else emptyList()
+                        else -> emptyList()
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Logger.log(e)
+                    emptyList()
+                }
+            }
+            if (_binding == null || !isAdded) return@launch
+            binding.selectorProgressBar.visibility = View.GONE
+            val list = ep.extractors
+            val adapter = binding.selectorRecyclerView.adapter as? ExtractorAdapter
+            if (chosen is LazyHosterExtractor && list != null) {
+                val idx = list.indexOf(chosen)
+                if (idx >= 0) {
+                    list.removeAt(idx)
+                    list.addAll(idx, replacement)
+                } else {
+                    list.addAll(replacement)
+                }
+                adapter?.replace(chosen, replacement)
+            } else {
+                adapter?.refresh(chosen)
+            }
+            val next = if (replacement.isNotEmpty()) {
+                replacement.firstOrNull { it.isPreferred } ?: replacement.first()
+            } else {
+                failedServers.add(chosen.server.name)
+                list?.remove(chosen)
+                adapter?.remove(chosen)
+                snackString(getString(R.string.auto_select_server_error))
+                nextBestServer(ep)
+            }
+            if (next == null) {
+                if (adapter == null || adapter.itemCount == 0) tryWith { dismissAllowingStateLoss() }
+                return@launch
+            }
+            ep.selectedExtractor = next.server.name
+            if (ep.selectedVideo !in next.videos.indices) ep.selectedVideo = 0
+            val epKey = media.anime?.episodes?.getEpisodeKey(media.anime?.selectedEpisode) ?: media.anime?.selectedEpisode
+            if (epKey != null) {
+                media.anime?.episodes?.get(epKey)?.selectedExtractor = next.server.name
+                media.anime?.episodes?.get(epKey)?.selectedVideo = ep.selectedVideo
+            }
+            startExoplayer(media)
+        }
+        return true
+    }
+
+    private fun nextBestServer(ep: Episode): VideoExtractor? {
+        val candidates = ep.extractors?.filter {
+            it.videos.isNotEmpty() && it.server.name !in failedServers
+        } ?: return null
+        return candidates.firstOrNull { it.isPreferred && !it.isPlaceholder && !it.needsResolve }
+            ?: candidates.firstOrNull { !it.isPlaceholder && !it.needsResolve }
+            ?: candidates.firstOrNull { !it.isPlaceholder }
+            ?: candidates.firstOrNull()
+    }
+
     @OptIn(DelicateCoroutinesApi::class)
     @SuppressLint("UnsafeOptInUsageError")
     fun startExoplayer(media: Media) {
         if (!isAdded || _binding == null) return
+        if (prepareSelected(media)) return
         prevEpisode = null
 
         episode?.let { ep ->
@@ -676,9 +767,14 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                 it.server.name == ep.selectedExtractor
             }?.videos?.getOrNull(ep.selectedVideo)
             video?.file?.url?.let { url ->
+                // Only our own torrent server links count as torrents on loopback: extensions
+                // such as Anikage, Miruro and AniNeko serve their streams through a local
+                // proxy on 127.0.0.1 too ("/proxy/...?url="), which used to start the
+                // torrent engine and fail.
+                val isOwnTorrentLink = ani.dantotsu.parsers.StreamTypeDetector.isLocalhostUrl(url) &&
+                        url.contains("/stream") && url.contains("hash=")
                 val isTorrent = url.startsWith("magnet:") || url.endsWith(".torrent") ||
-                        url.contains("/stream?hash=") || url.contains("127.0.0.1") ||
-                        ep.extra?.containsKey("torrentHash") == true
+                        isOwnTorrentLink || ep.extra?.containsKey("torrentHash") == true
                 if (isTorrent) {
                     val torrentManager = Injekt.get<TorrentServerManager>()
                     if (torrentManager.isAvailable()) {
@@ -689,11 +785,11 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                                 torrentManager.start()
                                 val torrentHash = ep.extra?.get("torrentHash")
                                     ?: (if (url.contains("hash=")) url.substringAfter("hash=").substringBefore("&") else null)
-                                val index = ep.extra?.get("fileId")?.toIntOrNull()
+                                val explicitIndex = ep.extra?.get("fileId")?.toIntOrNull()
                                     ?: (if (url.contains("index=")) url.substringAfter("index=").substringBefore("&").toIntOrNull() else null)
-                                    ?: 0
 
                                 if (torrentHash != null) {
+                                    val index = explicitIndex ?: 0
                                     torrentManager.activeTorrentHash = torrentHash
                                     torrentManager.prebuffer(torrentHash, index)
                                 } else if (url.startsWith("magnet:") || url.endsWith(".torrent")) {
@@ -703,6 +799,9 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                                     val currentTorrent = torrentManager.addTorrent(
                                         url, video.quality.toString(), "", "", false
                                     )
+                                    // no file index (batch torrent without fileIdx): play the
+                                    // largest video file, not file 0 (often a sample/NFO)
+                                    val index = explicitIndex ?: torrentManager.bestVideoFileIndex(currentTorrent)
                                     torrentManager.activeTorrentHash = currentTorrent.hash
                                     torrentManager.prebuffer(currentTorrent.hash!!, index)
                                     video.file.url = torrentManager.getLink(currentTorrent, index)
@@ -821,6 +920,32 @@ class SelectorDialogFragment : BottomSheetDialogFragment() {
                         notifyItemInserted(links.size - 1)
                     }
                 }
+            }
+        }
+
+        fun replace(old: VideoExtractor, replacement: List<VideoExtractor>) {
+            val idx = links.indexOf(old)
+            if (idx < 0) {
+                replacement.forEach { add(it) }
+                return
+            }
+            links.removeAt(idx)
+            val fresh = replacement.filter { it.videos.isNotEmpty() }
+            links.addAll(idx, fresh)
+            notifyItemRemoved(idx)
+            notifyItemRangeInserted(idx, fresh.size)
+        }
+
+        fun refresh(extractor: VideoExtractor) {
+            val idx = links.indexOf(extractor)
+            if (idx >= 0) notifyItemChanged(idx)
+        }
+
+        fun remove(extractor: VideoExtractor) {
+            val idx = links.indexOf(extractor)
+            if (idx >= 0) {
+                links.removeAt(idx)
+                notifyItemRemoved(idx)
             }
         }
 

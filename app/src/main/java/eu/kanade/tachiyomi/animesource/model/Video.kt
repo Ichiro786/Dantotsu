@@ -149,6 +149,27 @@ data class Video(
             field = value
         }
 
+    /**
+     * True when this video (or one of its tracks) is served by the source's local
+     * [HttpServer] (lib 17): its urls point at [HttpServer.PLACEHOLDER_URL].
+     */
+    fun usesHttpServer(): Boolean {
+        if (localUrl.find(videoUrl) != null) return true
+        if (audioTracks.any { localUrl.find(it.url) != null }) return true
+        if (subtitleTracks.any { localUrl.find(it.url) != null }) return true
+        return false
+    }
+
+    /** Copy with the placeholder host replaced by the running server's port. */
+    fun copyHttpServer(port: Int): Video {
+        val newHost = "http://localhost:$port"
+        return this.copy(
+            videoUrl = localUrl.replace(videoUrl, newHost),
+            subtitleTracks = subtitleTracks.map { it.copy(url = localUrl.replace(it.url, newHost)) },
+            audioTracks = audioTracks.map { it.copy(url = localUrl.replace(it.url, newHost)) },
+        )
+    }
+
     enum class State {
         QUEUE,
         LOAD_VIDEO,
@@ -158,6 +179,7 @@ data class Video(
 
     companion object {
         const val MPV_ARGS_TAG = "ANIYOMI_MPV_ARGS"
+        private val localUrl = Regex("""http://localhost:1(?!\d)""")
     }
 }
 

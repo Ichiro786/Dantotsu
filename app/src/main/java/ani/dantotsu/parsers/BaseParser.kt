@@ -386,6 +386,8 @@ data class ShowResponse(
             out.writeInt(manga.status)
             out.writeObject(manga.thumbnail_url)
             out.writeBoolean(manga.initialized)
+            // last in the stream: older saves simply lack it
+            runCatching { out.writeObject(manga.memo.toString()) }
         } else {
             out.writeBoolean(false)
         }
@@ -427,6 +429,12 @@ data class ShowResponse(
                     status = inStream.readInt()
                     thumbnail_url = inStream.readObject() as? String
                     initialized = inStream.readBoolean()
+                    memo = runCatching {
+                        val raw = inStream.readObject() as? String ?: "{}"
+                        kotlinx.serialization.json.Json.parseToJsonElement(raw)
+                            as? kotlinx.serialization.json.JsonObject
+                            ?: kotlinx.serialization.json.JsonObject(emptyMap())
+                    }.getOrDefault(kotlinx.serialization.json.JsonObject(emptyMap()))
                 }
                 sManga = manga
             }

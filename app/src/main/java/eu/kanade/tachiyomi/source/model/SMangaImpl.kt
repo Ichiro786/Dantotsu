@@ -62,4 +62,22 @@ class SMangaImpl : SManga {
         set(value) {
             _memo = value
         }
+
+    // memo (a JsonObject, not java-Serializable) is kept across the app's java
+    // serialization (saved show responses, chapter cache) as its JSON string: extensions
+    // put ids/tokens there that later requests need. Streams written before this have no
+    // memo and read back as an empty one.
+    private fun writeObject(out: java.io.ObjectOutputStream) {
+        out.defaultWriteObject()
+        out.writeObject(memo.toString())
+    }
+
+    private fun readObject(input: java.io.ObjectInputStream) {
+        input.defaultReadObject()
+        _memo = runCatching {
+            (input.readObject() as? String)?.let {
+                kotlinx.serialization.json.Json.parseToJsonElement(it) as? JsonObject
+            }
+        }.getOrNull() ?: JsonObject(emptyMap())
+    }
 }

@@ -141,4 +141,7 @@ fun SManga.copyFrom(other: SManga) {
     status = other.status
     update_strategy = other.update_strategy
     initialized = other.initialized
+    // the source's own state (ids/tokens) for later requests; an empty memo from a
+    // details call must not wipe one we already have
+    if (other.memo.isNotEmpty()) memo = other.memo
 }

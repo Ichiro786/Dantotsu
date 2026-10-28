@@ -389,7 +389,10 @@ class MangaExtensionManager(
 
         if (availableExt.versionName.isNotBlank() && availableExt.versionName == versionName) return false
 
-        return (availableExt.versionCode > versionCode || availableExt.libVersion > (libVersion + 0.001))
+        // Lib versions are normalised to two decimals: a Float metadata value (1.4f -> 1.3999)
+        // must compare equal to the repo's "1.4".
+        fun norm(v: Double) = Math.round(v * 100.0) / 100.0
+        return (availableExt.versionCode > versionCode || norm(availableExt.libVersion) > norm(libVersion))
     }
 
     private fun updatePendingUpdatesCount() {

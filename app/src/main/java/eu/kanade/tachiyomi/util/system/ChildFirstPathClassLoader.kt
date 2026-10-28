@@ -29,6 +29,19 @@ class ChildFirstPathClassLoader(
             } catch (_: ClassNotFoundException) {}
         }
 
+        if (c == null && name != null && isHostApi(name)) {
+            // Host API first: an extension that bundles its own kotlin-stdlib/coroutines
+            // (newer Miruro, AniNeko builds) would otherwise get a second copy of
+            // kotlin.coroutines.Continuation, COROUTINE_SUSPENDED etc., and every suspend
+            // call between it and the host fails (ClassCastException /
+            // IncompatibleClassChangeError, swallowed into empty results).
+            c = try {
+                parent.loadClass(name)
+            } catch (_: ClassNotFoundException) {
+                null
+            }
+        }
+
         if (c == null) {
             c = try {
                 findClass(name)
@@ -43,6 +56,9 @@ class ChildFirstPathClassLoader(
 
         return c
     }
+
+    private fun isHostApi(name: String): Boolean =
+        HOST_FIRST_PREFIXES.any { name.startsWith(it) }
 
     override fun getResource(name: String?): URL? {
         return systemClassLoader?.getResource(name)
@@ -82,5 +98,28 @@ class ChildFirstPathClassLoader(
         } catch (_: IOException) {
             return null
         }
+    }
+
+    private companion object {
+        /**
+         * Packages whose classes cross the host/extension boundary and must be the host's.
+         * Everything else (keiyoushi.*, bundled NanoHTTPD, androidx.webkit boundary
+         * interfaces, ...) stays extension-first.
+         */
+        val HOST_FIRST_PREFIXES = arrayOf(
+            "kotlin.",
+            "kotlinx.",
+            "okhttp3.",
+            "okio.",
+            "org.jsoup.",
+            "rx.",
+            "uy.kohesive.injekt.",
+            "app.cash.quickjs.",
+            "androidx.preference.",
+            "eu.kanade.tachiyomi.animesource.",
+            "eu.kanade.tachiyomi.source.",
+            "eu.kanade.tachiyomi.network.",
+            "eu.kanade.tachiyomi.util.",
+        )
     }
 }

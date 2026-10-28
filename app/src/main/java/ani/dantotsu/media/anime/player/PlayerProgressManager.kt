@@ -20,6 +20,7 @@ import ani.dantotsu.util.customAlertDialog
 import ani.dantotsu.widgets.continue_widget.ContinueWidget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @UnstableApi
 class PlayerProgressManager(
@@ -31,6 +32,9 @@ class PlayerProgressManager(
 
     private val handler = Handler(Looper.getMainLooper())
     private var preloading = false
+
+    /** Called on the main thread once the next episode's servers have been prefetched. */
+    var onNextEpisodePrefetched: ((Episode) -> Unit)? = null
     private var lastSubscriptionPromptEpisode: String? = null
     private var isTrackingProgress = false
     private var isProgressSavedForCurrentEpisode = false
@@ -105,6 +109,9 @@ class PlayerProgressManager(
                             model.loadEpisodeSingleVideo(ep, selected, false)
                         } else {
                             model.loadEpisodeVideos(ep, selected.sourceIndex, false)
+                        }
+                        withContext(Dispatchers.Main) {
+                            if (!ep.extractors.isNullOrEmpty()) onNextEpisodePrefetched?.invoke(ep)
                         }
                     }
                 }

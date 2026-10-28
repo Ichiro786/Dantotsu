@@ -424,7 +424,9 @@ internal object ExtensionLoader {
             appInfo.fixBasePaths(privateFile.absolutePath)
         }
 
+        // yuzono/keiyoushi-built anime extensions use the tachiyomix.* keys
         val extName = appInfo.metaData?.getString("aniyomix.name")
+            ?: appInfo.metaData?.getString("tachiyomix.name")?.removePrefix("Aniyomi: ")?.removePrefix("Tachiyomi: ")
             ?: pkgManager.getApplicationLabel(appInfo).toString().substringAfter("Aniyomi: ")
         val versionName = pkgInfo.versionName
         val versionCode = PackageInfoCompat.getLongVersionCode(pkgInfo)
@@ -465,6 +467,7 @@ internal object ExtensionLoader {
 
         val loadNsfwSource = isNsfwAllowed(context)
         val isNsfw = (appInfo.metaData?.getInt("aniyomix.contentWarning", 0) ?: 0) > 0 ||
+            (appInfo.metaData?.getInt("tachiyomix.contentWarning", 0) ?: 0) > 0 ||
             appInfo.metaData?.getInt("$ANIME_PACKAGE$XX_METADATA_NSFW", 0) == 1
         if (!loadNsfwSource && isNsfw) {
             Logger.log("NSFW extension $pkgName not allowed")

@@ -370,9 +370,7 @@ class PlayerCastManager(
     private fun getProxiedMediaItem(item: MediaItem, video: Video?): MediaItem {
         val originalUri = item.localConfiguration?.uri ?: return item
         val uriStr = originalUri.toString()
-        val headers = mutableMapOf<String, String>()
-        headers.putAll(defaultHeaders)
-        video?.file?.headers?.let { headers.putAll(it) }
+        val headers = ani.dantotsu.parsers.StreamHeaders.merge(defaultHeaders, video?.file?.headers).toMutableMap()
 
         val proxyServer = CastProxyServerService.currentProxyServer
             ?: CastProxyServer(contentResolver = activity.contentResolver, ipAddress = CastProxyServer.getLocalIpAddress())

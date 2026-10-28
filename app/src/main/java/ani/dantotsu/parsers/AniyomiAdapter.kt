@@ -43,6 +43,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import ani.dantotsu.parsers.StreamHeaders.toFlatMap
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.HttpServer
 import okhttp3.Request
 import org.json.JSONObject
 import uy.kohesive.injekt.Injekt
@@ -52,6 +55,8 @@ import java.net.MalformedURLException
 import java.net.URL
 import java.net.URLDecoder
 import java.util.Locale
+
+private const val MAX_PARALLEL_HOSTERS = 4
 
 class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
     val extension: AnimeExtension.Installed
@@ -269,8 +274,11 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
                 }
             }
             return@withContext sortedEpisodes.map { sEpisodeToEpisode(it) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Logger.log("Exception: $e")
+            reportSourceError(source, e, animePageUrl(source, sAnime))
         }
         return@withContext emptyList()
     }
@@ -287,23 +295,35 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
         }
         return true
     }
+    private fun currentAnimeSource(): AnimeSource? =
+        (extension.sources.getOrNull(sourceLanguage) ?: extension.sources.firstOrNull()) as? AnimeSource
+
+    /** source.headers of an http source; extensions can throw from headersBuilder(). */
+    private fun sourceHeadersOf(source: AnimeSource?): Map<String, String> =
+        runCatching { (source as? AnimeHttpSource)?.headers.toFlatMap() }.getOrNull() ?: emptyMap()
+
+    private fun sourceClientOf(source: AnimeSource?): okhttp3.OkHttpClient? =
+        runCatching { (source as? AnimeHttpSource)?.client }.getOrNull()
+
     override suspend fun loadVideoServers(
         episodeLink: String,
         extra: Map<String, String>?,
         sEpisode: SEpisode
     ): List<VideoServer> = withContext(Dispatchers.IO) {
-        val source = (extension.sources.getOrNull(sourceLanguage)
-            ?: extension.sources.firstOrNull()) as? AnimeSource ?: return@withContext emptyList()
+        val source = currentAnimeSource() ?: return@withContext emptyList()
 
         return@withContext try {
             val videos = getVideoList(source, sEpisode)
-
-            videos.map { videoToVideoServer(it) }
+            val sourceHeaders = sourceHeadersOf(source)
+            videos.map { videoToVideoServer(it, sourceHeaders) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Logger.log("Exception occurred: ${e.message}")
             emptyList()
         }
     }
+
     suspend fun getVideoList(
         source: AnimeSource,
         episode: SEpisode
@@ -333,32 +353,18 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
             activeHosters
         }
 
+        val semaphore = Semaphore(MAX_PARALLEL_HOSTERS)
         val hosterVideos = if (hostersToFetch.isNotEmpty()) {
             coroutineScope {
                 hostersToFetch.map { hoster ->
                     async(Dispatchers.IO) {
-                        val videos = when {
-                            !hoster.videoList.isNullOrEmpty() -> hoster.videoList
-                            else -> runCatching {
-                                source.getVideoList(hoster)
-                            }.getOrElse { emptyList() }
-                        }
-
-                        videos.map { video ->
-                            val resolved = resolveVideo(source, video)
-                            val title = if (
-                                hoster.hosterName.isBlank() ||
-                                hoster.hosterName == NO_HOSTER_LIST
-                            ) {
-                                resolved.videoTitle
-                            } else {
-                                "${hoster.hosterName} - ${resolved.videoTitle}"
+                        semaphore.withPermit {
+                            fetchHosterVideos(source, hoster).map { video ->
+                                resolveVideo(source, video).copy(
+                                    videoTitle = titleFor(hoster, video),
+                                    initialized = true
+                                )
                             }
-
-                            resolved.copy(
-                                videoTitle = title,
-                                initialized = true
-                            )
                         }
                     }
                 }.awaitAll().flatten()
@@ -371,7 +377,7 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
             coroutineScope {
                 directVideos.map {
                     async(Dispatchers.IO) {
-                        resolveVideo(source, it)
+                        semaphore.withPermit { resolveVideo(source, it) }
                     }
                 }.awaitAll()
             }
@@ -380,17 +386,81 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
         }
 
         val allVideos = (resolvedDirect + hosterVideos)
-            .distinctBy {
-                if (it.videoUrl.isNotBlank() && it.videoUrl != "null") it.videoUrl
-                else if (it.url.isNotBlank() && it.url != "null") it.url
-                else it.videoTitle
-            }
-            .filter { (it.videoUrl.isNotBlank() && it.videoUrl != "null") || (it.url.isNotBlank() && it.url != "null") }
+            .distinctBy { videoKey(it) }
+            .filter { hasUsableUrl(it) }
 
         return@withContext runCatching {
             if (source is AnimeHttpSource) source.run { allVideos.sortVideos() } else allVideos
         }.getOrElse { allVideos }
     }
+
+    private suspend fun fetchHosterVideos(
+        source: AnimeSource,
+        hoster: Hoster,
+        onError: ((Throwable) -> Unit)? = null,
+    ): List<Video> =
+        if (!hoster.videoList.isNullOrEmpty()) {
+            hoster.videoList
+        } else {
+            try {
+                source.getVideoList(hoster)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Logger.log("Hoster ${hoster.hosterName} failed: ${e.message}")
+                onError?.invoke(e)
+                emptyList()
+            }
+        }
+
+    private fun isStubError(e: Throwable): Boolean =
+        e is IllegalStateException || e is UnsupportedOperationException ||
+            e is AbstractMethodError || e is NoSuchMethodError ||
+            e.message == "Stub!" || e.message == "Not used"
+
+    private fun absoluteUrl(source: AnimeHttpSource, url: String): String =
+        if (url.startsWith("http", ignoreCase = true)) url else source.baseUrl.trimEnd('/') + "/" + url.trimStart('/')
+
+    private fun episodePageUrl(source: AnimeSource, episode: SEpisode): String? =
+        (source as? AnimeHttpSource)?.let { src ->
+            runCatching { absoluteUrl(src, src.getEpisodeUrl(episode)) }.getOrNull()
+        }
+
+    private fun animePageUrl(source: AnimeSource, anime: SAnime): String? =
+        (source as? AnimeHttpSource)?.let { src ->
+            runCatching { absoluteUrl(src, src.getAnimeUrl(anime)) }.getOrNull()
+                ?: runCatching { src.getHomeUrl() }.getOrNull()
+        }
+
+    /** The extension's own message (often "open in WebView ...") with a WebView action. */
+    private fun reportSourceError(source: AnimeSource, error: Throwable?, pageUrl: String?) {
+        ani.dantotsu.others.webview.SourceWebViewActivity.showSourceError(
+            name,
+            error?.takeUnless { isStubError(it) }?.let { it.message ?: it.javaClass.simpleName },
+            pageUrl,
+            sourceHeadersOf(source),
+        )
+    }
+
+    private fun titleFor(hoster: Hoster?, video: Video): String =
+        if (hoster == null || hoster.hosterName.isBlank() || hoster.hosterName == NO_HOSTER_LIST) {
+            video.videoTitle
+        } else {
+            "${hoster.hosterName} - ${video.videoTitle}"
+        }
+
+    private fun isRealUrl(url: String) = url.isNotBlank() && url != "null"
+
+    private fun hasUsableUrl(video: Video) = isRealUrl(video.videoUrl) || isRealUrl(video.url)
+
+    private fun videoKey(video: Video): String =
+        if (isRealUrl(video.videoUrl)) video.videoUrl
+        else if (isRealUrl(video.url)) video.url
+        else video.videoTitle
+
+    /** A video that only a resolveVideo/getVideoUrl call can turn into a playable url. */
+    private fun needsResolution(video: Video): Boolean =
+        !video.initialized || !isRealUrl(video.videoUrl)
 
     private suspend fun resolveVideo(
         source: AnimeSource,
@@ -401,9 +471,13 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
         }
 
         // 1. Modern lib 16 API: call resolveVideo directly (avoids throwing UnsupportedOperationException from getVideoUrl)
-        val resolved = runCatching {
+        val resolved = try {
             if (source is AnimeHttpSource) source.resolveVideo(video) else null
-        }.getOrNull()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
 
         if (resolved != null && resolved.videoUrl.isNotBlank() && resolved.videoUrl != "null") {
             return@withContext resolved
@@ -411,9 +485,13 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
 
         // 2. Legacy fallback for old sources: only call getVideoUrl if resolveVideo returned null and url is blank
         if (video.videoUrl == "null" || video.videoUrl.isEmpty()) {
-            val newUrl = runCatching {
+            val newUrl = try {
                 if (source is AnimeHttpSource) source.getVideoUrl(video) else null
-            }.getOrNull()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            }
 
             if (!newUrl.isNullOrEmpty() && newUrl != "null") {
                 return@withContext video.copy(videoUrl = newUrl, initialized = true)
@@ -423,9 +501,285 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
         return@withContext video
     }
 
+    /** Resolves one video for [VideoServerPassthrough] (selected-only resolution). */
+    internal suspend fun resolveForPlayback(source: AnimeSource, video: Video): Video? {
+        val resolved = resolveVideo(source, video)
+        return resolved.takeIf { isRealUrl(it.videoUrl) }?.copy(initialized = true)
+    }
+
+    /**
+     * Re-fetches the links of one server for [VideoServerPassthrough.refreshLinks]: the same
+     * hoster is asked for its videos again and the same video (by title, else resolution) is
+     * resolved. Hoster video lists embedded in getHosterList are refreshed through a new
+     * getHosterList call, since the embedded links are the ones that expired.
+     */
+    internal suspend fun refetchVideo(
+        source: AnimeSource,
+        sEpisode: SEpisode,
+        hosterName: String?,
+        originalTitle: String,
+        resolution: Int?,
+    ): Video? = withContext(Dispatchers.IO) {
+        val hosters = try {
+            source.getHosterList(sEpisode)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        val candidates = if (hosters.isEmpty()) {
+            try {
+                source.getVideoList(sEpisode)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        } else {
+            val hoster = hosters.firstOrNull { it.hosterName == (hosterName ?: NO_HOSTER_LIST) }
+                ?: hosters.firstOrNull { hosterName == null && (it.hosterName.isBlank() || it.hosterName == NO_HOSTER_LIST) }
+                ?: return@withContext null
+            fetchHosterVideos(source, hoster)
+        }
+        val match = candidates.firstOrNull { it.videoTitle == originalTitle }
+            ?: resolution?.let { res -> candidates.firstOrNull { it.resolution == res } }
+            ?: return@withContext null
+        resolveForPlayback(source, match)
+    }
+
+    private fun newPassthrough(
+        source: AnimeSource,
+        sEpisode: SEpisode,
+        hoster: Hoster?,
+        video: Video,
+        sourceHeaders: Map<String, String>,
+    ): VideoServerPassthrough {
+        val titled = video.copy(videoTitle = titleFor(hoster, video))
+        val server = videoToVideoServer(titled, sourceHeaders)
+        return VideoServerPassthrough(server).also { ext ->
+            ext.sourceClient = sourceClientOf(source)
+            ext.sourceHeaders = sourceHeaders
+            ext.parser = this
+            ext.animeSource = source
+            ext.sEpisode = sEpisode
+            ext.hosterName = hoster?.hosterName?.takeIf { it.isNotBlank() && it != NO_HOSTER_LIST }
+            ext.originalTitle = video.videoTitle
+            ext.unresolved = needsResolution(video)
+            if (!ext.unresolved) ext.resolvedAtMs = System.currentTimeMillis()
+        }
+    }
+
+    /**
+     * Progressive server list: each hoster's videos are handed to [callback] as soon as that
+     * hoster answers (at most [MAX_PARALLEL_HOSTERS] hosters in flight), instead of waiting for
+     * every hoster and resolving every video first. Lazy hosters are shown as tappable
+     * placeholders ([LazyHosterExtractor]) and only fetched when picked.
+     *
+     * With [resolveLazily] a video that still needs the source's resolveVideo is listed
+     * unresolved and resolved only when it is picked ([VideoExtractor.needsResolve]).
+     */
+    suspend fun streamVideoServers(
+        sEpisode: SEpisode,
+        resolveLazily: Boolean,
+        callback: (VideoExtractor) -> Unit
+    ): Unit = withContext(Dispatchers.IO) {
+        val source = currentAnimeSource() ?: return@withContext
+        val sourceHeaders = sourceHeadersOf(source)
+        val seen = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+        val semaphore = Semaphore(MAX_PARALLEL_HOSTERS)
+        val emitted = java.util.concurrent.atomic.AtomicInteger(0)
+        val firstError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val recordError: (Throwable) -> Unit = { firstError.compareAndSet(null, it) }
+        var hosterError: Throwable? = null
+
+        suspend fun emit(hoster: Hoster?, videos: List<Video>) {
+            val sorted = runCatching {
+                if (source is AnimeHttpSource) source.run { videos.sortVideos() } else videos
+            }.getOrElse { videos }
+            for (raw in sorted) {
+                val video = if (!resolveLazily && needsResolution(raw)) resolveVideo(source, raw) else raw
+                if (!hasUsableUrl(video) && !(resolveLazily && needsResolution(video))) continue
+                val key = if (isRealUrl(video.videoUrl)) video.videoUrl
+                else "${hoster?.hosterName}|${video.videoTitle}|${video.url}"
+                if (!seen.add(key)) continue
+                val ext = newPassthrough(source, sEpisode, hoster, video, sourceHeaders)
+                var loaded: VideoExtractor? = null
+                try {
+                    loaded = ext.load()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    Logger.log("Server ${ext.server.name} skipped: ${e.message}")
+                }
+                if (loaded != null) {
+                    emitted.incrementAndGet()
+                    callback(loaded)
+                }
+            }
+        }
+
+        val hosters = try {
+            source.getHosterList(sEpisode)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            hosterError = e
+            emptyList()
+        }
+
+        if (hosters.isEmpty()) {
+            val direct = try {
+                source.getVideoList(sEpisode)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Logger.log("getVideoList failed: ${e.message}")
+                // lib < 16 sources fail getHosterList with a stub error and lib 16 ones fail
+                // getVideoList(episode) that way: report whichever error is real
+                recordError(if (isStubError(e)) hosterError ?: e else e)
+                emptyList()
+            }
+            if (resolveLazily) {
+                emit(null, direct)
+            } else {
+                val resolved = coroutineScope {
+                    direct.map { v -> async { semaphore.withPermit { resolveVideo(source, v) } } }.awaitAll()
+                }
+                emit(null, resolved)
+            }
+            if (emitted.get() == 0) reportSourceError(source, firstError.get(), episodePageUrl(source, sEpisode))
+            return@withContext
+        }
+
+        val sortedHosters = runCatching {
+            if (source is AnimeHttpSource) source.run { hosters.sortHosters() } else hosters
+        }.getOrElse { hosters }
+        val eager = sortedHosters.filterNot { it.lazy }.ifEmpty { listOfNotNull(sortedHosters.firstOrNull()) }
+        sortedHosters.filter { it.lazy && it !in eager }.forEach { hoster ->
+            callback(LazyHosterExtractor(this@DynamicAnimeParser, source, sEpisode, hoster, resolveLazily))
+        }
+        coroutineScope {
+            eager.map { hoster ->
+                async {
+                    semaphore.withPermit {
+                        emit(hoster, fetchHosterVideos(source, hoster, recordError))
+                    }
+                }
+            }.awaitAll()
+        }
+        if (emitted.get() == 0 && sortedHosters.none { it.lazy }) {
+            reportSourceError(source, firstError.get(), episodePageUrl(source, sEpisode))
+        }
+    }
+
+    /** Loads the videos of one lazy hoster (on tap) as ready-to-play extractors. */
+    internal suspend fun loadLazyHoster(
+        source: AnimeSource,
+        sEpisode: SEpisode,
+        hoster: Hoster,
+        resolveLazily: Boolean,
+    ): List<VideoExtractor> = withContext(Dispatchers.IO) {
+        val sourceHeaders = sourceHeadersOf(source)
+        val videos = runCatching {
+            if (source is AnimeHttpSource) source.run { fetchHosterVideos(source, hoster).sortVideos() }
+            else fetchHosterVideos(source, hoster)
+        }.getOrElse { emptyList() }
+        videos.mapNotNull { raw ->
+            val video = if (!resolveLazily && needsResolution(raw)) resolveVideo(source, raw) else raw
+            if (!hasUsableUrl(video) && !(resolveLazily && needsResolution(video))) return@mapNotNull null
+            runCatching { newPassthrough(source, sEpisode, hoster, video, sourceHeaders).load() }.getOrNull()
+        }
+    }
+
+    override suspend fun loadByVideoServers(
+        episodeUrl: String,
+        extra: Map<String, String>?,
+        sEpisode: SEpisode,
+        callback: (VideoExtractor) -> Unit
+    ) {
+        loadByVideoServers(episodeUrl, extra, sEpisode, resolveLazily = false, callback = callback)
+    }
+
+    override suspend fun loadByVideoServers(
+        episodeUrl: String,
+        extra: Map<String, String>?,
+        sEpisode: SEpisode,
+        resolveLazily: Boolean,
+        callback: (VideoExtractor) -> Unit
+    ) {
+        try {
+            streamVideoServers(sEpisode, resolveLazily, callback)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Logger.log("loadByVideoServers failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Default-server path: only the hoster the saved server belongs to is fetched (server
+     * names are "<hoster> - <video title>"), not every hoster of the episode. Falls back to
+     * the full list when no hoster matches, e.g. the site renamed its hosters.
+     */
+    override suspend fun loadSingleVideoServer(
+        serverName: String,
+        episodeUrl: String,
+        extra: Map<String, String>?,
+        sEpisode: SEpisode,
+        post: Boolean
+    ): VideoExtractor? = withContext(Dispatchers.IO) {
+        try {
+            val source = currentAnimeSource() ?: return@withContext null
+            val sourceHeaders = sourceHeadersOf(source)
+            val hosters = try {
+                source.getHosterList(sEpisode)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            val hoster = hosters.firstOrNull {
+                it.hosterName.isNotBlank() && it.hosterName != NO_HOSTER_LIST &&
+                    serverName.startsWith("${it.hosterName} - ")
+            }
+            if (hoster != null) {
+                val videos = runCatching {
+                    if (source is AnimeHttpSource) source.run { fetchHosterVideos(source, hoster).sortVideos() }
+                    else fetchHosterVideos(source, hoster)
+                }.getOrElse { emptyList() }
+                val target = videos.firstOrNull { titleFor(hoster, it) == serverName }
+                    ?: videos.firstOrNull { it.preferred }
+                    ?: videos.firstOrNull()
+                if (target != null) {
+                    val video = resolveVideo(source, target)
+                    if (hasUsableUrl(video)) {
+                        return@withContext newPassthrough(source, sEpisode, hoster, video, sourceHeaders).load()
+                    }
+                }
+            }
+            // No matching hoster (or it failed): previous behaviour over the full list.
+            val servers = loadVideoServers(episodeUrl, extra, sEpisode)
+            val target = servers.find { it.name == serverName }
+                ?: servers.find { it.isPreferred }
+                ?: servers.firstOrNull()
+            target?.let { (getVideoExtractor(it) as? VideoServerPassthrough)?.load() }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Logger.log("loadSingleVideoServer failed: ${e.message}")
+            null
+        }
+    }
 
     override suspend fun getVideoExtractor(server: VideoServer): VideoExtractor {
-        return VideoServerPassthrough(server)
+        val source = currentAnimeSource()
+        return VideoServerPassthrough(server).also { ext ->
+            ext.sourceClient = sourceClientOf(source)
+            ext.sourceHeaders = sourceHeadersOf(source)
+            ext.parser = this
+            ext.animeSource = source
+            ext.resolvedAtMs = System.currentTimeMillis()
+        }
     }
 
     override suspend fun search(query: String): List<ShowResponse> {
@@ -448,9 +802,11 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
         } catch (e: CloudflareBypassException) {
             Logger.log("Exception in search: $e")
             Logger.log(e)
-            withContext(Dispatchers.Main) {
-                snackString("Failed to bypass Cloudflare")
-            }
+            // solving the challenge once in the WebView clears it for the source
+            val home = runCatching { (source as? AnimeHttpSource)?.getHomeUrl() }.getOrNull()
+            ani.dantotsu.others.webview.SourceWebViewActivity.showSourceError(
+                name, "Failed to bypass Cloudflare", home, sourceHeadersOf(source)
+            )
             emptyList()
         } catch (e: Exception) {
             Logger.log("General exception in search: $e")
@@ -461,15 +817,20 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
 
 
     private fun convertAnimesPageToShowResponse(animesPage: AnimesPage): List<ShowResponse> {
+        // covers are often hotlink-protected: send the source's headers (Referer, UA)
+        val coverHeaders = sourceHeadersOf(currentAnimeSource())
         return animesPage.animes.map { sAnime ->
-            // Extract required fields from sAnime
-            val name = sAnime.title
-            val link = sAnime.url
-            val coverUrl = sAnime.thumbnail_url ?: ""
-
-            // Create a new ShowResponse
-            ShowResponse(name, link, coverUrl, sAnime)
+            ShowResponse(
+                sAnime.title,
+                sAnime.url,
+                FileUrl(sAnime.thumbnail_url ?: "", coverHeaders),
+                sAnime = sAnime
+            )
         }
+    }
+
+    private val episodeImageHeaders: Map<String, String> by lazy {
+        sourceHeadersOf(currentAnimeSource())
     }
 
     private fun sEpisodeToEpisode(sEpisode: SEpisode): Episode {
@@ -480,6 +841,11 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
             } else {
                 sEpisode.episode_number
             }
+        // Summary, preview image and filler mark from the extension are kept: the episode
+        // list shows them when no tracker (Kitsu/Anify) data is there.
+        val preview = sEpisode.preview_url?.takeIf { it.isNotBlank() }?.let { url ->
+            FileUrl(url, episodeImageHeaders)
+        }
         return Episode(
             if (episodeNumberInt.toInt() != -1) {
                 if (sEpisode.episode_number % 1 == 0f) {
@@ -492,19 +858,21 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
             },
             sEpisode.url,
             sEpisode.name,
-            null,
-            null,
-            false,
+            preview,
+            sEpisode.summary?.takeIf { it.isNotBlank() },
+            sEpisode.fillermark,
             null,
             sEpisode
         )
     }
 
-    private fun videoToVideoServer(video: Video): VideoServer {
+    private fun videoToVideoServer(video: Video, sourceHeaders: Map<String, String> = emptyMap()): VideoServer {
         val targetUrl = video.videoUrl.takeIf { it.isNotBlank() && it != "null" }
             ?: video.url.takeIf { it.isNotBlank() && it != "null" }
             ?: ""
-        val headersMap = video.headers?.toMultimap()?.mapValues { it.value.joinToString() } ?: mapOf()
+        // source.headers under video.headers (Aniyomi falls back to source.headers when a
+        // video has none; Referer/Origin usually live there).
+        val headersMap = StreamHeaders.merge(sourceHeaders, video.headers.toFlatMap())
         return VideoServer(
             video.videoTitle.ifBlank { video.quality },
             FileUrl(targetUrl, headersMap),
@@ -552,29 +920,94 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
             ?: extension.sources.firstOrNull()) as? MangaSource ?: return emptyList()
 
         return try {
-            val (networkManga, res) = try {
-                val update = runCatching { source.getMangaUpdate(sManga, emptyList(), fetchDetails = true, fetchChapters = true) }.getOrNull()
-                if (update != null && (update.chapters.isNotEmpty() || update.manga.title.isNotBlank())) {
-                    Pair(update.manga, update.chapters)
-                } else {
-                    val details = runCatching { source.getMangaDetails(sManga) }.getOrNull()
-                    val chapters = runCatching { source.getChapterList(sManga) }.getOrDefault(emptyList())
-                    Pair(details, chapters)
-                }
-            } catch (e: Exception) {
-                Pair(null, emptyList<eu.kanade.tachiyomi.source.model.SChapter>())
-            }
-
+            val (networkManga, res) = fetchMangaUpdate(source, mangaLink, sManga)
             if (networkManga != null) {
                 sManga.copyFrom(networkManga)
             }
-            val reversedRes = res.reversed()
-            val chapterList = reversedRes.map { sChapterToMangaChapter(it) }
-            chapterList
+            res.reversed().map { sChapterToMangaChapter(it) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Logger.log("loadChapters Exception: $e")
             emptyList()
         }
+    }
+
+    /**
+     * One getMangaUpdate per manga at a time: the details screen asks for chapters from
+     * several places (cached list, refresh, source switch); a second caller now joins the
+     * running request. The chapters already known for this manga are passed in (Mihon passes
+     * its database chapters; some sources use them, and their memo, for incremental updates).
+     * Falls back to getMangaDetails + getChapterList only when getMangaUpdate itself is
+     * unsupported or failed, not when it legitimately returned an empty list.
+     */
+    private suspend fun fetchMangaUpdate(
+        source: MangaSource,
+        mangaLink: String,
+        sManga: SManga,
+    ): Pair<SManga?, List<SChapter>> {
+        val key = "${source.id}|${sManga.url.ifBlank { mangaLink }}"
+        val job = mangaUpdateJobs.compute(key) { _, running ->
+            if (running != null && !running.isCompleted) running
+            else mangaUpdateScope.async { fetchMangaUpdateNow(source, mangaLink, sManga) }
+        }!!
+        return try {
+            job.await()
+        } finally {
+            if (job.isCompleted) mangaUpdateJobs.remove(key, job)
+        }
+    }
+
+    private suspend fun fetchMangaUpdateNow(
+        source: MangaSource,
+        mangaLink: String,
+        sManga: SManga,
+    ): Pair<SManga?, List<SChapter>> {
+        val known = runCatching {
+            ani.dantotsu.media.manga.ChapterStorage.loadChapters(saveName.ifBlank { name }, mangaLink)
+                ?.values?.map { it.sChapter }?.reversed()
+        }.getOrNull().orEmpty()
+        val update = try {
+            source.getMangaUpdate(sManga, known, fetchDetails = true, fetchChapters = true)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // UnsupportedOperationException / NoSuchMethodError (older libs) or a failed request
+            Logger.log("getMangaUpdate failed, using details + chapter list: ${e.message}")
+            null
+        }
+        if (update != null) return Pair(update.manga, update.chapters)
+        val details = try {
+            source.getMangaDetails(sManga)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        val chapters = try {
+            source.getChapterList(sManga)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Logger.log("getChapterList failed: ${e.message}")
+            // the source's message often says what to do ("open in WebView ...")
+            val http = source as? HttpSource
+            val pageUrl = http?.let { src ->
+                runCatching {
+                    val u = src.getMangaUrl(sManga)
+                    if (u.startsWith("http", true)) u else src.baseUrl.trimEnd('/') + "/" + u.trimStart('/')
+                }.getOrNull()
+            }
+            val headers = runCatching { http?.headers.toFlatMap() }.getOrNull() ?: emptyMap()
+            ani.dantotsu.others.webview.SourceWebViewActivity.showSourceError(name, e.message, pageUrl, headers)
+            emptyList()
+        }
+        return Pair(details, chapters)
+    }
+
+    private companion object {
+        val mangaUpdateJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Deferred<Pair<SManga?, List<SChapter>>>>()
+        val mangaUpdateScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
     }
 
 
@@ -670,9 +1103,13 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
             throw e
         } catch (e: CloudflareBypassException) {
             Logger.log("Exception in search: $e")
-            withContext(Dispatchers.Main) {
-                snackString("Failed to bypass Cloudflare")
-            }
+            val http = source as? HttpSource
+            ani.dantotsu.others.webview.SourceWebViewActivity.showSourceError(
+                name,
+                "Failed to bypass Cloudflare",
+                runCatching { http?.getHomeUrl() }.getOrNull(),
+                runCatching { http?.headers.toFlatMap() }.getOrNull() ?: emptyMap(),
+            )
             emptyList()
         } catch (e: Exception) {
             Logger.log("General exception in search: $e")
@@ -682,14 +1119,18 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
 
 
     private fun convertMangasPageToShowResponse(mangasPage: MangasPage): List<ShowResponse> {
+        // covers are often hotlink-protected: send the source's headers (Referer, UA)
+        val coverHeaders = runCatching {
+            ((extension.sources.getOrNull(sourceLanguage) ?: extension.sources.firstOrNull()) as? HttpSource)
+                ?.headers.toFlatMap()
+        }.getOrNull() ?: emptyMap()
         return mangasPage.mangas.map { sManga ->
-            // Extract required fields from sManga
-            val name = sManga.title
-            val link = sManga.url
-            val coverUrl = sManga.thumbnail_url ?: ""
-
-            // Create a new ShowResponse
-            ShowResponse(name, link, coverUrl, sManga)
+            ShowResponse(
+                sManga.title,
+                sManga.url,
+                FileUrl(sManga.thumbnail_url ?: "", coverHeaders),
+                sManga = sManga
+            )
         }
     }
 
@@ -743,13 +1184,165 @@ class DynamicMangaParser(extension: MangaExtension.Installed) : MangaParser() {
     }
 }
 
-class VideoServerPassthrough(private val videoServer: VideoServer) : VideoExtractor() {
+/**
+ * A lazy hoster (Hoster.lazy) shown in the server list without fetching it. Its single
+ * placeholder video carries no playable url; [load] fetches the hoster's real videos when
+ * the user picks it.
+ */
+class LazyHosterExtractor internal constructor(
+    @Transient private val parser: DynamicAnimeParser,
+    @Transient private val source: AnimeSource,
+    @Transient private val sEpisode: SEpisode,
+    @Transient private val hoster: Hoster,
+    private val resolveLazily: Boolean,
+) : VideoExtractor() {
+    override val server: VideoServer = VideoServer(
+        hoster.hosterName.ifBlank { "Server" },
+        FileUrl(hoster.hosterUrl),
+    )
+
+    init {
+        videos = listOf(
+            ani.dantotsu.parsers.Video(
+                null,
+                VideoType.CONTAINER,
+                FileUrl(LAZY_PREFIX + hoster.hosterName),
+                null,
+                "Tap to load",
+            )
+        )
+    }
+
+    override val isPlaceholder: Boolean
+        get() = true
+
+    override suspend fun extract(): VideoContainer = VideoContainer(videos)
+
+    /** Fetches this hoster's videos; empty when the hoster has none or failed. */
+    suspend fun loadHoster(): List<VideoExtractor> =
+        parser.loadLazyHoster(source, sEpisode, hoster, resolveLazily)
+
+    companion object {
+        const val LAZY_PREFIX = "lazy-hoster:"
+    }
+}
+
+class VideoServerPassthrough(private var videoServer: VideoServer) : VideoExtractor() {
     override val server: VideoServer
         get() = videoServer
 
+    // Set by DynamicAnimeParser; used for selected-only resolution and link refresh.
+    @Transient internal var parser: DynamicAnimeParser? = null
+    @Transient internal var animeSource: AnimeSource? = null
+    @Transient internal var sEpisode: SEpisode? = null
+    @Transient internal var hosterName: String? = null
+    @Transient internal var originalTitle: String = ""
+    @Transient internal var unresolved: Boolean = false
+    @Transient internal var sourceHeaders: Map<String, String> = emptyMap()
+
+    override val needsResolve: Boolean
+        get() = unresolved
+
+    override suspend fun load(): VideoExtractor {
+        if (unresolved && !hasPlayableUrl()) {
+            // Listed before resolution: show it, but with no playable link yet.
+            videos = listOf(placeholderVideo())
+            subtitles = emptyList()
+            audioTracks = emptyList()
+            return this
+        }
+        return super.load()
+    }
+
+    private fun hasPlayableUrl(): Boolean {
+        val v = videoServer.video ?: return false
+        return (v.videoUrl.isNotBlank() && v.videoUrl != "null") || (v.url.isNotBlank() && v.url != "null")
+    }
+
+    private fun placeholderVideo(): ani.dantotsu.parsers.Video {
+        val v = videoServer.video
+        val quality = v?.resolution ?: v?.videoTitle?.let { Regex("""\d+""").find(it)?.value?.toIntOrNull() } ?: 0
+        return ani.dantotsu.parsers.Video(
+            quality,
+            VideoType.CONTAINER,
+            FileUrl("$UNRESOLVED_PREFIX${videoServer.name}", videoServer.embed.headers),
+            null,
+            null,
+            null,
+            preferred = v?.preferred == true
+        )
+    }
+
+    /**
+     * Runs the source's resolveVideo for this one video (it was listed unresolved).
+     * Returns false when the source could not resolve it.
+     */
+    suspend fun resolveNow(): Boolean {
+        if (!unresolved) return true
+        val p = parser ?: return false
+        val src = animeSource ?: return false
+        val video = videoServer.video ?: return false
+        val resolved = p.resolveForPlayback(src, video) ?: return false
+        replaceVideo(resolved)
+        return true
+    }
+
+    /** Video as the extension returned it, before a lib-17 HttpServer port was filled in. */
+    @Transient private var preServerVideo: Video? = null
+
+    /** True when this video is served by the source's local HttpServer (extensions-lib 17). */
+    fun usesHttpServer(): Boolean =
+        (preServerVideo ?: videoServer.video)?.usesHttpServer() == true
+
+    /**
+     * Creates and starts the source's HttpServer and points this video (and its tracks) at
+     * its port. The caller owns the server and must stop() it when the video changes.
+     * Returns null when the source has none or it failed to start.
+     */
+    suspend fun startHttpServer(): HttpServer? {
+        val src = animeSource as? AnimeHttpSource ?: return null
+        val base = preServerVideo ?: videoServer.video ?: return null
+        if (!base.usesHttpServer()) return null
+        val server = withContext(Dispatchers.IO) {
+            try {
+                src.createHttpServer()?.also { it.start() }
+            } catch (e: Throwable) {
+                Logger.log("HttpServer failed to start: ${e.message}")
+                null
+            }
+        } ?: return null
+        preServerVideo = base
+        replaceVideo(base.copyHttpServer(server.listeningPort))
+        return server
+    }
+
+    override suspend fun refreshLinks(): Boolean {
+        val p = parser ?: return false
+        val src = animeSource ?: return false
+        val ep = sEpisode ?: return false
+        val fresh = p.refetchVideo(src, ep, hosterName, originalTitle, videoServer.video?.resolution)
+            ?: return false
+        preServerVideo = null
+        replaceVideo(fresh)
+        return true
+    }
+
+    private suspend fun replaceVideo(fresh: Video) {
+        val titled = fresh.copy(videoTitle = videoServer.video?.videoTitle ?: fresh.videoTitle)
+        val url = titled.videoUrl.takeIf { it.isNotBlank() && it != "null" } ?: titled.url
+        videoServer = videoServer.copy(
+            embed = FileUrl(url, StreamHeaders.merge(sourceHeaders, titled.headers.toFlatMap())),
+            video = titled,
+        )
+        unresolved = false
+        super.load()
+        resolvedAtMs = System.currentTimeMillis()
+    }
+
     override suspend fun extract(): VideoContainer {
         val vidList = listOfNotNull(videoServer.video?.let { aniVideoToSaiVideo(it) })
-        val headersMap = videoServer.video?.headers?.toMultimap()?.mapValues { it.value.joinToString() } ?: mapOf()
+        val headersMap = vidList.firstOrNull()?.file?.headers
+            ?: StreamHeaders.merge(sourceHeaders, videoServer.video?.headers.toFlatMap())
         val videoUrl = vidList.firstOrNull()?.file?.url ?: ""
         val subList = videoServer.video?.subtitleTracks?.map { trackToSubtitle(it, videoUrl, headersMap) } ?: emptyList()
         val audioList = videoServer.video?.audioTracks ?: emptyList()
@@ -759,6 +1352,10 @@ class VideoServerPassthrough(private val videoServer: VideoServer) : VideoExtrac
         } else {
             throw Exception("No videos found")
         }
+    }
+
+    companion object {
+        const val UNRESOLVED_PREFIX = "unresolved:"
     }
 
     private fun aniVideoToSaiVideo(aniVideo: Video): ani.dantotsu.parsers.Video {
@@ -838,8 +1435,9 @@ class VideoServerPassthrough(private val videoServer: VideoServer) : VideoExtrac
             else
                 throw malformed
         }
+        // defaults are added by the player; here source.headers -> video.headers
         val headersMap: Map<String, String> =
-            aniVideo.headers?.toMultimap()?.mapValues { it.value.joinToString() } ?: mapOf()
+            StreamHeaders.merge(sourceHeaders, aniVideo.headers.toFlatMap())
 
 
         return Video(
@@ -849,8 +1447,25 @@ class VideoServerPassthrough(private val videoServer: VideoServer) : VideoExtrac
             null,
             null,
             parseDrmInfo(aniVideo.internalData),
-            preferred = aniVideo.preferred
+            preferred = aniVideo.preferred,
+            mimeTypeHint = mimeTypeHintOf(aniVideo),
         )
+    }
+
+    /**
+     * Honours the container hints Aniyomi extensions give mpv/ffmpeg: a forced MPEG-TS
+     * demuxer ("demuxer-lavf-format=mpegts", ffmpeg "-f mpegts", or a "force_mpegts" flag).
+     * Some hosts serve TS segments behind .jpg/.png/.html urls that ExoPlayer can't sniff.
+     */
+    private fun mimeTypeHintOf(aniVideo: Video): String? {
+        val args = aniVideo.mpvArgs + aniVideo.ffmpegStreamArgs + aniVideo.ffmpegVideoArgs
+        val forcesTs = args.any { (key, value) ->
+            val k = key.trim().trimStart('-').lowercase()
+            val v = value.trim().lowercase()
+            (k == "force_mpegts" && v != "no" && v != "false" && v != "0") ||
+                ((k == "demuxer-lavf-format" || k == "f" || k == "format") && v == "mpegts")
+        }
+        return if (forcesTs) androidx.media3.common.MimeTypes.VIDEO_MP2T else null
     }
 
     /**

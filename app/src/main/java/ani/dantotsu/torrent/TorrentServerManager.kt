@@ -310,6 +310,20 @@ class TorrentServerManager(private val context: Context) {
     }
 
     /**
+     * Index of the file to play when the link names none: the largest video file
+     * (mkv/mp4/webm/avi/m4v/ts/mov), else the largest file, else 0.
+     */
+    fun bestVideoFileIndex(torrent: Torrent): Int {
+        val files = torrent.file_stats ?: return 0
+        val videoExt = setOf("mkv", "mp4", "webm", "avi", "m4v", "ts", "mov", "wmv", "flv")
+        val videos = files.filter { stat ->
+            stat.path.substringAfterLast('.', "").lowercase() in videoExt
+        }
+        val best = (videos.ifEmpty { files }).maxByOrNull { it.length } ?: return 0
+        return best.id ?: files.indexOf(best).coerceAtLeast(0)
+    }
+
+    /**
      * Pre-buffers video file using qBittorrent's 1% Head + 1% Tail piece algorithm.
      * This guarantees container header and moov atom / Matroska Cues are downloaded
      * before ExoPlayer begins playback, preventing buffering freezes.

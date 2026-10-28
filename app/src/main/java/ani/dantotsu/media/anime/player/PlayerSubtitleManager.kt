@@ -141,13 +141,28 @@ class PlayerSubtitleManager(
         if (resolvedUrl.isNotBlank()) {
             serverSubJob = activity.lifecycleScope.launch(Dispatchers.IO) {
                 try {
-                    val client = Injekt.get<NetworkHelper>().client
-                    val requestBuilder = Request.Builder().url(resolvedUrl)
-                    defaultHeaders.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
-                    sub.file.headers?.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
-                    client.newCall(requestBuilder.build()).execute().use { response ->
-                        if (response.isSuccessful) {
-                            val content = response.body?.string()
+                    // Some extensions (KissKH) hand over subtitles they decrypted to a local
+                    // file:// path; OkHttp can't fetch those.
+                    val isLocalFile = resolvedUrl.startsWith("file:", ignoreCase = true) ||
+                        resolvedUrl.startsWith("/")
+                    val fetched: String? = if (isLocalFile) {
+                        val path = if (resolvedUrl.startsWith("/")) resolvedUrl
+                        else Uri.parse(resolvedUrl).path
+                        path?.let { File(it) }?.takeIf { it.isFile }?.readText()
+                    } else {
+                        val client = Injekt.get<NetworkHelper>().client
+                        val requestBuilder = Request.Builder().url(resolvedUrl)
+                        // one value per header name (defaults -> source -> video); addHeader
+                        // used to send two User-Agents when the extension set its own
+                        ani.dantotsu.parsers.StreamHeaders.merge(defaultHeaders, sub.file.headers)
+                            .forEach { (k, v) -> requestBuilder.header(k, v) }
+                        client.newCall(requestBuilder.build()).execute().use { response ->
+                            if (response.isSuccessful) response.body.string() else null
+                        }
+                    }
+                    run {
+                        run {
+                            val content = fetched
                             if (!content.isNullOrBlank()) {
                                 val ext = when (formatStr) {
                                     "ASS" -> "ass"
@@ -435,7 +450,8 @@ class PlayerSubtitleManager(
             )
             .setTsExtractorTimestampSearchBytes(1500 * androidx.media3.extractor.ts.TsExtractor.TS_PACKET_SIZE)
             .setMp4ExtractorFlags(androidx.media3.extractor.mp4.Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS)
-            .setMatroskaExtractorFlags(androidx.media3.extractor.mkv.MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
+            // FLAG_DISABLE_SEEK_FOR_CUES used to be set here: without the Cues index an MKV is
+            // not seekable (resume position and every seek restarted from the beginning).
             .setSubtitleParserFactory(compositeParserFactory)
         return defaultExtractorsFactory.withAssMkvSupport(assSubtitleParserFactory, handler)
     }

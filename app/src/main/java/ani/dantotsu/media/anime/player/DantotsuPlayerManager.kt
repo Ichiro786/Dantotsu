@@ -30,6 +30,8 @@ import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import ani.dantotsu.defaultHeaders
@@ -37,6 +39,7 @@ import ani.dantotsu.media.anime.AudioFocusListener
 import ani.dantotsu.media.anime.MediaDataSourceFactory
 import ani.dantotsu.media.anime.VideoCache
 import ani.dantotsu.others.LanguageMapper
+import ani.dantotsu.parsers.StreamHeaders
 import ani.dantotsu.parsers.StreamTypeDetector
 import ani.dantotsu.parsers.Video
 import ani.dantotsu.parsers.VideoType
@@ -46,6 +49,7 @@ import ani.dantotsu.toast
 import ani.dantotsu.util.Logger
 import io.github.peerless2012.ass.media.kt.withAssSupport
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.ByteArrayInputStream
@@ -77,59 +81,89 @@ class DantotsuPlayerManager(
     var isInitialized = false
         private set
 
-    private val DEFAULT_MIN_BUFFER_MS = 15_000
-    private val DEFAULT_MAX_BUFFER_MS = 45_000
-    private val BUFFER_FOR_PLAYBACK_MS = 1_500
-    private val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 3_000
-    private val BACK_BUFFER_DURATION_MS = 15_000
+    // Buffering tuned for streaming from flaky anime CDNs over mobile data: start fast
+    // (1 s), re-start after a stall with 2 s, but keep up to 60-120 s ahead so short network
+    // dips never reach the screen. The back buffer lets a short rewind play without a refetch.
+    private val DEFAULT_MIN_BUFFER_MS = 60_000
+    private val DEFAULT_MAX_BUFFER_MS = 120_000
+    private val BUFFER_FOR_PLAYBACK_MS = 1_000
+    private val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 2_000
+    private val BACK_BUFFER_DURATION_MS = 30_000
 
-    fun initTrackSelector() {
-        val subLanguages = arrayOf(
-            "Albanian", "Arabic", "Bosnian", "Bulgarian", "Chinese", "Croatian", "Czech", "Danish", "Dutch", "English",
-            "Estonian", "Finnish", "French", "Georgian", "German", "Greek", "Hebrew", "Hindi", "Indonesian", "Irish",
-            "Italian", "Japanese", "Korean", "Lithuanian", "Luxembourgish", "Macedonian", "Mongolian", "Norwegian",
-            "Polish", "Portuguese", "Punjabi", "Romanian", "Russian", "Serbian", "Slovak", "Slovenian", "Spanish",
-            "Turkish", "Ukrainian", "Urdu", "Vietnamese"
-        )
-        val langName = subLanguages.getOrNull(PrefManager.getVal<Int>(PrefName.SubLanguage)) ?: "English"
-        val langCode = LanguageMapper.getLanguageCode(langName)
-        val selector = DefaultTrackSelector(activity)
-        val params = selector.buildUponParameters()
-        if (langCode.isNotBlank() && !langCode.equals("all", ignoreCase = true)) {
-            params.setPreferredTextLanguage(langCode)
-        }
-        trackSelector = selector.apply {
-            parameters = params.build()
-        }
+    // Start HLS/DASH at a high rendition instead of ExoPlayer's conservative default
+    // estimate; it steps down if the network can't keep up.
+    private val INITIAL_BITRATE_ESTIMATE = 12_000_000L
+
+    // A flaky CDN segment is retried 6 times (ExoPlayer's default is 3) before the player
+    // gives up and the error handler takes over.
+    private val loadErrorPolicy = DefaultLoadErrorHandlingPolicy(6)
+
+    private val bandwidthMeter: DefaultBandwidthMeter by lazy {
+        DefaultBandwidthMeter.Builder(activity.applicationContext)
+            .setInitialBitrateEstimate(INITIAL_BITRATE_ESTIMATE)
+            .build()
     }
 
-    fun buildMediaSource(
-        video: Video,
-        subConfigs: List<MediaItem.SubtitleConfiguration>,
-        mimeType: String?,
-        downloadedMediaItem: MediaItem?,
-        mediaMetadata: MediaMetadata? = null,
-        audioTracks: List<eu.kanade.tachiyomi.animesource.model.Track> = emptyList()
-    ): Pair<MediaSource, MediaItem> {
-        val videoUri = runCatching { video.file.url.toUri() }.getOrNull()
-        val isLocalhost = StreamTypeDetector.isLocalhost(videoUri)
-        val isLocalhostTorrent = StreamTypeDetector.isTorrentStream(videoUri)
-        val isLocalhostMp4 = StreamTypeDetector.isLocalMp4(videoUri)
+    /** LoadControl flavour the current player was built with (torrents buffer by bytes). */
+    private var builtForTorrent: Boolean? = null
 
-        val headers = mutableMapOf<String, String>()
-        headers.putAll(defaultHeaders)
-        video.file.headers?.let {
-            headers.putAll(it)
-        }
-        if (isLocalhost) {
-            headers.remove("Accept-Encoding")
-            headers.remove("accept-encoding")
-        }
+    private val subLanguages = arrayOf(
+        "Albanian", "Arabic", "Bosnian", "Bulgarian", "Chinese", "Croatian", "Czech", "Danish", "Dutch", "English",
+        "Estonian", "Finnish", "French", "Georgian", "German", "Greek", "Hebrew", "Hindi", "Indonesian", "Irish",
+        "Italian", "Japanese", "Korean", "Lithuanian", "Luxembourgish", "Macedonian", "Mongolian", "Norwegian",
+        "Polish", "Portuguese", "Punjabi", "Romanian", "Russian", "Serbian", "Slovak", "Slovenian", "Spanish",
+        "Turkish", "Ukrainian", "Urdu", "Vietnamese"
+    )
 
-        val httpClient = client.newBuilder().apply {
+    /**
+     * Track selection preferences, applied to the selector *before* the player is built so
+     * the first selection is already right (no audio/text switch after prepare).
+     * Audio: Japanese for sub watchers; for dub watchers the subtitle language, then English.
+     */
+    private fun buildTrackSelectionParameters(): DefaultTrackSelector.Parameters {
+        val langName = subLanguages.getOrNull(PrefManager.getVal<Int>(PrefName.SubLanguage)) ?: "English"
+        val langCode = LanguageMapper.getLanguageCode(langName)
+        val preferDub = PrefManager.getVal<Boolean>(PrefName.SettingsPreferDub)
+        return DefaultTrackSelector.Parameters.Builder(activity).apply {
+            if (langCode.isNotBlank() && !langCode.equals("all", ignoreCase = true)) {
+                setPreferredTextLanguage(langCode)
+            }
+            if (preferDub) {
+                val dubLangs = listOf(langCode, "en").filter { it.isNotBlank() && !it.equals("all", true) }.distinct()
+                setPreferredAudioLanguages(*dubLangs.toTypedArray())
+            } else {
+                setPreferredAudioLanguages("ja")
+            }
+            // never let the selector pick a track the decoder can't take
+            setExceedRendererCapabilitiesIfNecessary(true)
+        }.build()
+    }
+
+    fun initTrackSelector() {
+        trackSelector = DefaultTrackSelector(activity, buildTrackSelectionParameters())
+    }
+
+    /**
+     * The client a stream is fetched with: the extension source's client (cookies,
+     * Cloudflare, DoH, its interceptors) with the disk cache removed and no call timeout (a
+     * progressive stream is one long call). Loopback streams use system DNS (DoH resolvers
+     * refuse "localhost") and get the NanoHTTPD gzip/m3u8 workarounds.
+     */
+    private fun streamClient(base: OkHttpClient, isLocalhost: Boolean): OkHttpClient =
+        base.newBuilder().apply {
+            cache(null)
+            callTimeout(0, java.util.concurrent.TimeUnit.SECONDS)
             connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
             readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
             writeTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            if (isLocalhost) dns(Dns.SYSTEM)
+            MediaDataSourceFactory.dropRateLimiters(this)
+            addLocalhostWorkarounds(this)
+        }.build()
+
+    /** NanoHTTPD (torrent server / local proxies) workarounds; no-ops for remote hosts. */
+    private fun addLocalhostWorkarounds(builder: OkHttpClient.Builder) {
+        builder.apply {
             // Strip Accept-Encoding on the wire for localhost/127.0.0.1 NanoHTTPD server.
             // When NanoHTTPD forwards requests upstream to CDNs (like imgnex/megaplay),
             // having NO Accept-Encoding header allows NanoHTTPD's internal OkHttpClient
@@ -223,7 +257,32 @@ class DantotsuPlayerManager(
                     response
                 }
             }
-        }.build()
+        }
+    }
+
+    fun buildMediaSource(
+        video: Video,
+        subConfigs: List<MediaItem.SubtitleConfiguration>,
+        mimeType: String?,
+        downloadedMediaItem: MediaItem?,
+        mediaMetadata: MediaMetadata? = null,
+        audioTracks: List<eu.kanade.tachiyomi.animesource.model.Track> = emptyList(),
+        sourceClient: OkHttpClient? = null,
+    ): Pair<MediaSource, MediaItem> {
+        val videoUri = runCatching { video.file.url.toUri() }.getOrNull()
+        val isLocalhost = StreamTypeDetector.isLocalhost(videoUri)
+        val isLocalhostTorrent = StreamTypeDetector.isTorrentStream(videoUri)
+        val isLocalhostMp4 = StreamTypeDetector.isLocalMp4(videoUri)
+
+        // defaults -> source.headers -> video.headers, case-insensitive, one User-Agent
+        var headers = StreamHeaders.merge(defaultHeaders, video.file.headers)
+        if (isLocalhost) {
+            headers = StreamHeaders.without(headers, "Accept-Encoding")
+        }
+
+        // Loopback streams (torrent server, extension HttpServer) don't need the source's
+        // interceptors (rate limits, Cloudflare); remote ones do.
+        val httpClient = streamClient(if (isLocalhost) client else (sourceClient ?: client), isLocalhost)
         val httpDataSourceFactory = MediaDataSourceFactory.resolveHttpFactory(
             context = activity,
             headers = headers,
@@ -232,10 +291,20 @@ class DantotsuPlayerManager(
         )
 
         val upstream = DefaultDataSource.Factory(activity, httpDataSourceFactory)
-        val cacheFactory: DataSource.Factory = CacheDataSource.Factory()
+        val segmentCacheFactory: DataSource.Factory = CacheDataSource.Factory()
             .setCache(VideoCache.getInstance(activity))
             .setUpstreamDataSourceFactory(upstream)
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        // Playlists (.m3u8/.mpd) go straight to the network: a cached playlist outlives its
+        // signed segment urls (reopening an episode replayed it and every segment got 403).
+        val isManifestStream = video.format == VideoType.M3U8 || video.format == VideoType.DASH ||
+            mimeType == androidx.media3.common.MimeTypes.APPLICATION_M3U8 ||
+            mimeType == androidx.media3.common.MimeTypes.APPLICATION_MPD
+        val cacheFactory: DataSource.Factory = PlaylistBypassDataSourceFactory(
+            cached = segmentCacheFactory,
+            direct = upstream,
+            manifestUrl = video.file.url.takeIf { isManifestStream },
+        )
 
         val extractorsFactory = subtitleManager.createExtractorsFactory()
         val assParserFactory = subtitleManager.createSubtitleParserFactory()
@@ -244,6 +313,7 @@ class DantotsuPlayerManager(
         val assMediaSourceFactory = DefaultMediaSourceFactory(cacheFactory, extractorsFactory)
             .setSubtitleParserFactory(assParserFactory)
             .setDrmSessionManagerProvider(drmProvider)
+            .setLoadErrorHandlingPolicy(loadErrorPolicy)
 
         val mediaItem = downloadedMediaItem?.buildUpon()?.apply {
             if (mediaMetadata != null) setMediaMetadata(mediaMetadata)
@@ -288,12 +358,14 @@ class DantotsuPlayerManager(
             DefaultMediaSourceFactory(localDataSourceFactory, extractorsFactory)
                 .setSubtitleParserFactory(assParserFactory)
                 .setDrmSessionManagerProvider(drmProvider)
+                .setLoadErrorHandlingPolicy(loadErrorPolicy)
         } else if (isLocalhostTorrent || isLocalhost) {
             // Direct upstream for localhost streams (torrents and local extension proxies)
             // - avoids double writing to flash via VideoCache and avoids Range request issues with NanoHTTPD
             DefaultMediaSourceFactory(upstream, extractorsFactory)
                 .setSubtitleParserFactory(assParserFactory)
                 .setDrmSessionManagerProvider(drmProvider)
+                .setLoadErrorHandlingPolicy(loadErrorPolicy)
         } else {
             assMediaSourceFactory
         }
@@ -358,6 +430,33 @@ class DantotsuPlayerManager(
         player.play()
     }
 
+    /**
+     * Starts the media source built by [buildMediaSource] at [startPositionMs].
+     *
+     * The player is created once and reused for every episode and server change: only the
+     * media source is swapped (setMediaSource with the start position, so there is no seek
+     * after prepare and no throw-away load from 0). A new player is built only the first
+     * time, or when the stream kind changes between torrent and non-torrent (different
+     * LoadControl).
+     */
+    fun startPlayback(
+        startPositionMs: Long,
+        playbackParameters: PlaybackParameters,
+        listener: Player.Listener,
+    ): ExoPlayer {
+        val player = exoPlayer
+        val isTorrent = StreamTypeDetector.isTorrentStream(currentMediaItem?.localConfiguration?.uri)
+        if (player == null || !isInitialized || builtForTorrent != isTorrent) {
+            return buildExoplayer(startPositionMs, playbackParameters, listener)
+        }
+        playerView.player = player
+        player.playbackParameters = playbackParameters
+        player.playWhenReady = true
+        mediaSource?.let { player.setMediaSource(it, startPositionMs.coerceAtLeast(0L)) }
+        player.prepare()
+        return player
+    }
+
     fun buildExoplayer(
         playbackPosition: Long,
         playbackParameters: PlaybackParameters,
@@ -369,25 +468,28 @@ class DantotsuPlayerManager(
         val uri = currentMediaItem?.localConfiguration?.uri
         val isTorrentStream = StreamTypeDetector.isTorrentStream(uri)
         val targetBufferBytes = if (isTorrentStream) 48 * 1024 * 1024 else androidx.media3.common.C.LENGTH_UNSET
-        val maxBufferMs = if (isTorrentStream) 60_000 else DEFAULT_MAX_BUFFER_MS
         val loadControl = DefaultLoadControl.Builder()
-            .setBackBuffer(BACK_BUFFER_DURATION_MS, false)
+            // retain from the previous keyframe, so a rewind into the back buffer needs no refetch
+            .setBackBuffer(BACK_BUFFER_DURATION_MS, true)
             .setBufferDurationsMs(
                 DEFAULT_MIN_BUFFER_MS,
-                maxBufferMs,
+                DEFAULT_MAX_BUFFER_MS,
                 BUFFER_FOR_PLAYBACK_MS,
                 BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
             )
             .setTargetBufferBytes(targetBufferBytes)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
+        builtForTorrent = isTorrentStream
 
         subtitleManager.initAssHandler()
         val handler = subtitleManager.assHandler!!
         Logger.log("Libass: Calling renderersFactory.withAssSupport()")
+        // forceDefaultRenderers (retry after a renderer runtime-check failure): ExoPlayer's
+        // own codec order, without the AAC software-first selector below.
         val renderersFactory = DefaultRenderersFactory(activity)
             .setEnableDecoderFallback(true)
-            .setMediaCodecSelector(object : MediaCodecSelector {
+            .setMediaCodecSelector(if (forceDefaultRenderers) MediaCodecSelector.DEFAULT else object : MediaCodecSelector {
                 override fun getDecoderInfos(
                     mimeType: String,
                     requiresSecureDecoder: Boolean,
@@ -414,19 +516,22 @@ class DantotsuPlayerManager(
 
         val mediaSourceFactory = activeMediaSourceFactory ?: DefaultMediaSourceFactory(activity)
             .setSubtitleParserFactory(subtitleManager.createSubtitleParserFactory())
+            .setLoadErrorHandlingPolicy(loadErrorPolicy)
 
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
-        val newTrackSelector = DefaultTrackSelector(activity)
+        // Preferences go in before build() so the very first track selection uses them.
+        val newTrackSelector = DefaultTrackSelector(activity, buildTrackSelectionParameters())
         this.trackSelector = newTrackSelector
 
         val player = ExoPlayer.Builder(activity, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setTrackSelector(newTrackSelector)
             .setLoadControl(loadControl)
+            .setBandwidthMeter(bandwidthMeter)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
@@ -443,11 +548,9 @@ class DantotsuPlayerManager(
 
         player.playWhenReady = true
         player.playbackParameters = playbackParameters
-        mediaSource?.let { player.setMediaSource(it) }
+        // Start position goes with the source: no prepare-from-0 followed by a seek.
+        mediaSource?.let { player.setMediaSource(it, playbackPosition.coerceAtLeast(0L)) }
         player.prepare()
-        if (playbackPosition > 0L) {
-            player.seekTo(playbackPosition)
-        }
 
         try {
             val rightNow = Calendar.getInstance()
@@ -475,6 +578,7 @@ class DantotsuPlayerManager(
         }
         exoPlayer = null
         trackSelector = null
+        builtForTorrent = null
         mediaSession?.release()
         mediaSession = null
     }

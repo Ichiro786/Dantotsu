@@ -17,7 +17,7 @@ object VideoCache {
         val databaseProvider = StandaloneDatabaseProvider(context.applicationContext)
         return SimpleCache(
             File(context.cacheDir, "exoplayer"),
-            LeastRecentlyUsedCacheEvictor(300L * 1024L * 1024L),
+            LeastRecentlyUsedCacheEvictor(500L * 1024L * 1024L),
             databaseProvider
         ).also { simpleCache = it }
     }

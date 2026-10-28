@@ -184,6 +184,11 @@ class PlayerSettingsActivity :
             PrefManager.setVal(PrefName.AutoSkipRecap, isChecked)
         }
 
+        binding.playerSettingsUseCronet.isChecked = PrefManager.getVal(PrefName.UseCronet)
+        binding.playerSettingsUseCronet.setOnCheckedChangeListener { _, isChecked ->
+            PrefManager.setVal(PrefName.UseCronet, isChecked)
+        }
+
         binding.playerSettingsAutoPlay.isChecked = PrefManager.getVal(PrefName.AutoPlay)
         binding.playerSettingsAutoPlay.setOnCheckedChangeListener { _, isChecked ->
             PrefManager.setVal(PrefName.AutoPlay, isChecked)

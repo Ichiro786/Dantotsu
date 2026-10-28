@@ -91,6 +91,7 @@ import ani.dantotsu.media.MediaDetailsViewModel
 import ani.dantotsu.media.MediaNameAdapter
 import ani.dantotsu.media.anime.player.CastScreenView
 import ani.dantotsu.media.anime.player.DantotsuPlayerManager
+import ani.dantotsu.media.anime.player.NextEpisodePreloader
 import ani.dantotsu.media.anime.player.PlayerAniSkipManager
 import ani.dantotsu.media.anime.player.PlayerCastManager
 import ani.dantotsu.media.anime.player.PlayerDiscordManager
@@ -231,7 +232,21 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
 
     private val handler = Handler(Looper.getMainLooper())
     val model: MediaDetailsViewModel by viewModels()
-    private val client = OkHttpClient()
+    // The app client (cookies, Cloudflare, DoH) for streams that don't come from an
+    // extension source; extension streams use their source's client.
+    private val client: OkHttpClient by lazy {
+        Injekt.get<eu.kanade.tachiyomi.network.NetworkHelper>().client
+    }
+
+    // extensions-lib 17 local HttpServer of the playing video (started/stopped by us)
+    private var httpServer: eu.kanade.tachiyomi.animesource.model.HttpServer? = null
+    private var httpServerFor: VideoExtractor? = null
+    private var httpServerFailedFor: VideoExtractor? = null
+    // stale-link refresh is tried once per extractor before it starts
+    private var staleCheckDoneFor: VideoExtractor? = null
+    // 401/403/410: re-resolve once, then the next best server, then the selector
+    private var linkRefreshTried = false
+    private val failedServers = mutableSetOf<String>()
 
     private val getContent = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         playerView.useController = true
@@ -294,6 +309,8 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         lateinit var media: Media
         var targetStartPosition: Long? = null
         private const val MAX_PLAYER_ERROR_RETRIES = 1
+        /** Extension stream links usually expire after ~30 min; refresh before that. */
+        private const val LINK_MAX_AGE_MS = 25 * 60 * 1000L
         const val ACTION_PIP_PREV_EP = "ani.dantotsu.PIP_PREV_EP"
         const val ACTION_PIP_REWIND = "ani.dantotsu.PIP_REWIND"
         const val ACTION_PIP_PLAY_PAUSE = "ani.dantotsu.PIP_PLAY_PAUSE"
@@ -377,6 +394,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         playerManager = DantotsuPlayerManager(this, playerView, subtitleManager, client) { error ->
             onPlayerError(error)
         }
+        MediaDataSourceFactory.warmUpCronet(this)
         gestureManager = PlayerGestureManager(
             this, playerView, exoBrightnessCont, exoVolumeCont, exoBrightness, exoVolume,
             { playerManager.exoPlayer }, { playerManager.isInitialized }
@@ -389,6 +407,17 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         progressManager = PlayerProgressManager(
             this, model, { playerManager.exoPlayer }, { playerManager.isInitialized }
         )
+        progressManager.onNextEpisodePrefetched = { nextEp ->
+            // warm the cache with the start of the next episode on the same server
+            val serverName = media.selected?.server ?: extractor?.server?.name
+            val next = nextEp.extractors?.find { it.server.name == serverName }
+                ?: nextEp.extractors?.firstOrNull { it.isPreferred && !it.isPlaceholder && !it.needsResolve }
+                ?: nextEp.extractors?.firstOrNull { !it.isPlaceholder && !it.needsResolve }
+            val nextVideo = next?.videos?.firstOrNull()
+            if (next != null && nextVideo != null && !next.server.offline && !next.needsResolve) {
+                NextEpisodePreloader.preload(this, lifecycleScope, nextVideo, next.sourceClient, client)
+            }
+        }
         screenshotManager = PlayerScreenshotManager(this, playerView)
         exoScreenshot.setOnClickListener {
             val title = media.userPreferredName.ifBlank { media.mainName() }
@@ -738,7 +767,9 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
                     episodeTitle.setSelection(currentEpisodeIndex)
                 }
                 if (playerManager.isInitialized) {
-                    releasePlayer()
+                    // the player is kept and reused for the next episode/server
+                    stopForSwitch()
+                    if (!changingServer) failedServers.clear()
                     playbackPosition = if (changingServer) {
                         currentPos ?: PrefManager.getCustomVal("${media.id}_${epKey ?: ep.number}", 0L)
                     } else {
@@ -938,11 +969,17 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         list.add(media.id)
         PrefManager.setCustomVal("continueAnimeList", list)
 
-        lifecycleScope.launch(Dispatchers.IO) { extractor?.onVideoStopped(video) }
-
         val ext = episode.extractors?.find { it.server.name == episode.selectedExtractor }
-            ?: episode.extractors?.firstOrNull { it.isPreferred }
-            ?: episode.extractors?.firstOrNull() ?: return
+            ?: episode.extractors?.firstOrNull { it.isPreferred && !it.isPlaceholder && !it.needsResolve }
+            ?: episode.extractors?.firstOrNull { !it.isPlaceholder && !it.needsResolve }
+            ?: episode.extractors?.firstOrNull { !it.isPlaceholder } ?: return
+        if (prepareStreamAsync(ext)) return
+
+        val previousExtractor = extractor
+        val previousVideo = video
+        if (previousExtractor != null) {
+            lifecycleScope.launch(Dispatchers.IO) { previousExtractor.onVideoStopped(previousVideo) }
+        }
         extractor = ext
         video = ext.videos.getOrNull(episode.selectedVideo) ?: ext.videos.firstOrNull() ?: return
 
@@ -1037,7 +1074,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         val isLocalDash = StreamTypeDetector.isLocalDash(uri)
         val isLocalhostHls = StreamTypeDetector.isLocalhostHls(uri)
 
-        val mimeType = when {
+        val mimeType = video?.mimeTypeHint ?: when {
             video?.format == VideoType.M3U8 ||
                     videoUrl.contains(".m3u8", ignoreCase = true) ||
                     videoUrl.contains("/m3u8", ignoreCase = true) ||
@@ -1145,7 +1182,8 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         } ?: ext.audioTracks
 
         playerManager.buildMediaSource(
-            video!!, subConfigs, mimeType, downloadedMediaItem, mediaMetadata, playbackAudioTracks
+            video!!, subConfigs, mimeType, downloadedMediaItem, mediaMetadata, playbackAudioTracks,
+            sourceClient = ext.sourceClient
         )
 
         castManager.setupCastButton(
@@ -1274,7 +1312,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
             .coerceIn(0, speeds.size - 1)
         val currentSpeed = speeds[savedSpeedIndex]
 
-        val exo = playerManager.buildExoplayer(
+        val exo = playerManager.startPlayback(
             savedPosition,
             PlaybackParameters(currentSpeed),
             this
@@ -1320,7 +1358,131 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
             .build()
     }
 
+    /**
+     * Episode/server switch: save where we were and stop the current stream, but keep the
+     * player (startPlayback swaps the media source on the same instance).
+     */
+    private fun stopForSwitch() {
+        playerManager.exoPlayer?.let { p ->
+            isPlayerPlaying = p.playWhenReady
+            playbackPosition = p.currentPosition
+            p.stop()
+        }
+        customSubtitleView.text = ""
+        exoSubtitleView.setCues(emptyList())
+        progressManager.stopTracking()
+        discordManager.clear()
+        linkRefreshTried = false
+    }
+
+    private fun stopHttpServer() {
+        val server = httpServer ?: return
+        httpServer = null
+        httpServerFor = null
+        playerCleanupScope.launch { runCatching { server.stop() } }
+    }
+
+    /**
+     * Work that must happen before [ext] can be played and needs the network: resolving a
+     * server that was listed unresolved, refreshing links older than [LINK_MAX_AGE_MS] (a
+     * prefetched next episode, or a server list left open), and starting the extension's
+     * lib-17 HttpServer. Runs in the background and calls initPlayer again when done.
+     * Returns true when it took over.
+     */
+    private fun prepareStreamAsync(ext: VideoExtractor): Boolean {
+        if (httpServerFor != null && httpServerFor !== ext) stopHttpServer()
+        val needResolve = ext.needsResolve
+        val stale = staleCheckDoneFor !== ext && !ext.server.offline &&
+            ext.resolvedAtMs > 0 && System.currentTimeMillis() - ext.resolvedAtMs > LINK_MAX_AGE_MS
+        val needServer = ext is ani.dantotsu.parsers.VideoServerPassthrough &&
+            httpServer == null && httpServerFailedFor !== ext && ext.usesHttpServer()
+        if (!needResolve && !stale && !needServer) return false
+        staleCheckDoneFor = ext
+        lifecycleScope.launch {
+            if (needResolve && ext is ani.dantotsu.parsers.VideoServerPassthrough) {
+                val ok = runCatching { ext.resolveNow() }.getOrDefault(false)
+                if (!ok) {
+                    if (!recoverWithNextServer(playbackPosition, ext)) {
+                        toast(getString(R.string.auto_select_server_error))
+                        sourceClick()
+                    }
+                    return@launch
+                }
+            }
+            if (stale) {
+                val ok = runCatching { withContext(Dispatchers.IO) { ext.refreshLinks() } }.getOrDefault(false)
+                Logger.log("Stream links older than ${LINK_MAX_AGE_MS / 60000} min, refreshed: $ok")
+            }
+            if (ext is ani.dantotsu.parsers.VideoServerPassthrough && httpServer == null && ext.usesHttpServer()) {
+                val server = ext.startHttpServer()
+                if (server == null) {
+                    httpServerFailedFor = ext
+                    toast("Couldn't start the extension's local server")
+                } else {
+                    httpServer = server
+                    httpServerFor = ext
+                }
+            }
+            if (!isDestroyed && !isFinishing) initPlayer()
+        }
+        return true
+    }
+
+    /** Plays the next best server of this episode at [positionMs]; false when none is left. */
+    private fun recoverWithNextServer(positionMs: Long, failed: VideoExtractor? = extractor): Boolean {
+        val current = failed
+        current?.let { failedServers.add(it.server.name) }
+        val candidates = episode.extractors?.filter {
+            it !== current && it.videos.isNotEmpty() && !it.isPlaceholder && it.server.name !in failedServers
+        }.orEmpty()
+        val next = candidates.firstOrNull { it.isPreferred && !it.needsResolve }
+            ?: candidates.firstOrNull { !it.needsResolve }
+            ?: candidates.firstOrNull()
+            ?: return false
+        Logger.log("Switching to next server: ${next.server.name}")
+        snackString("Trying ${next.server.name}", this)
+        episode.selectedExtractor = next.server.name
+        episode.selectedVideo = 0
+        playbackPosition = positionMs
+        linkRefreshTried = false
+        initPlayer()
+        return true
+    }
+
+    /**
+     * A 401/403/410 (or repeated HTTP errors) usually means the signed link expired. Fetch
+     * fresh links for the same server and quality and resume where we were; if that fails,
+     * fall through to the next best server, then the server selector.
+     */
+    private fun handleExpiredLink(positionMs: Long): Boolean {
+        val ext = extractor ?: return false
+        if (ext.server.offline) return false
+        if (linkRefreshTried) {
+            if (recoverWithNextServer(positionMs)) return true
+            return false
+        }
+        linkRefreshTried = true
+        lifecycleScope.launch {
+            val ok = runCatching { withContext(Dispatchers.IO) { ext.refreshLinks() } }.getOrDefault(false)
+            if (isDestroyed || isFinishing) return@launch
+            if (ok) {
+                Logger.log("Stream links refreshed after HTTP error, resuming at $positionMs")
+                if (httpServerFor === ext) stopHttpServer()
+                httpServerFailedFor = null
+                staleCheckDoneFor = ext
+                playbackPosition = positionMs
+                initPlayer()
+            } else if (!recoverWithNextServer(positionMs)) {
+                toast(getString(R.string.auto_select_server_error))
+                isPlayerPlaying = true
+                sourceClick()
+            }
+        }
+        return true
+    }
+
     private fun releasePlayer() {
+        stopHttpServer()
         playerManager.exoPlayer?.let { p ->
             isPlayerPlaying = p.playWhenReady
             playbackPosition = p.currentPosition
@@ -1459,6 +1621,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
     override fun onPlaybackStateChanged(playbackState: Int) {
         val player = playerManager.exoPlayer ?: return
         if (playbackState == ExoPlayer.STATE_READY) {
+            linkRefreshTried = false
             player.play()
             if (progressManager.episodeLength <= 0f && player.duration > 0) {
                 progressManager.episodeLength = player.duration.toFloat()
@@ -1573,7 +1736,11 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         aspectRatio = Rational(width, height)
         videoInfo.text = getString(R.string.video_quality, height)
 
-        if (player.duration < playbackPosition || playbackPosition > player.duration.toFloat() * 0.92) {
+        // Only an impossible start position is corrected here (it would end the episode at
+        // once and trigger autoplay). "Nearly finished" resume positions are already reset
+        // before the source is started (buildExoplayer), so the first frame never causes a
+        // second load from 0.
+        if (player.duration > 0 && playbackPosition >= player.duration) {
             playbackPosition = 0
             player.seekTo(0)
         }
@@ -1590,6 +1757,11 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
             PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
             PlaybackException.ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED,
             PlaybackException.ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE -> {
+                val httpCode = (cause as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.responseCode
+                val currentPos = if (playerManager.isInitialized) player?.currentPosition?.takeIf { it > 0 } ?: playbackPosition else playbackPosition
+                if (httpCode == 401 || httpCode == 403 || httpCode == 410) {
+                    if (handleExpiredLink(currentPos)) return
+                }
                 if (playerErrorRetryCount < MAX_PLAYER_ERROR_RETRIES) {
                     playerErrorRetryCount++
                     val savedPos = if (playerManager.isInitialized) player?.currentPosition?.takeIf { it > 0 } ?: playbackPosition else playbackPosition
@@ -1600,6 +1772,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
                     }
                 } else {
                     playerErrorRetryCount = 0
+                    if (error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS && handleExpiredLink(currentPos)) return
                     toast("Source Network Error: ${error.message}")
                     isPlayerPlaying = true
                     sourceClick()
@@ -1635,7 +1808,8 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
                         )
                         playerManager.buildMediaSource(
                             video!!, subConfigs, androidx.media3.common.MimeTypes.APPLICATION_M3U8,
-                            null, null, ext.audioTracks
+                            null, null, ext.audioTracks,
+                            sourceClient = ext.sourceClient
                         )
                     }
                     val currentParams = playerManager.exoPlayer?.playbackParameters ?: PlaybackParameters(1f)
@@ -1998,6 +2172,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         }
         aniSkipManager.stopTracking()
         progressManager.stopTracking()
+        NextEpisodePreloader.cancel()
         try {
             if (playerManager.isInitialized) {
                 progressManager.updateAniProgress()

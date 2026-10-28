@@ -393,7 +393,10 @@ class AnimeExtensionManager(
 
         if (availableExt.versionName.isNotBlank() && availableExt.versionName == versionName) return false
 
-        return (availableExt.versionCode > versionCode || availableExt.libVersion > (libVersion + 0.001))
+        // Anime libs are compared by major version only: the repo may report "16" while the
+        // loader derived 16.9 from a versionName (or the reverse), which showed a permanent
+        // "update available" badge.
+        return (availableExt.versionCode > versionCode || availableExt.libVersion.toInt() > libVersion.toInt())
     }
 
     private fun updatePendingUpdatesCount() {

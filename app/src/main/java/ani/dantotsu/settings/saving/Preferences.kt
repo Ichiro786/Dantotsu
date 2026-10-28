@@ -132,6 +132,9 @@ enum class PrefName(val data: Pref) {
 
     //Player
     DefaultSpeed(Pref(Location.Player, Int::class, 5)),
+    // Opt-in: stream over Cronet (HTTP/3). Off: the extension source's OkHttp client, which
+    // carries its cookies, Cloudflare clearance and DoH (ISP DNS blocks).
+    UseCronet(Pref(Location.Player, Boolean::class, false)),
     CursedSpeeds(Pref(Location.Player, Boolean::class, false)),
     Resize(Pref(Location.Player, Int::class, 0)),
     Subtitles(Pref(Location.Player, Boolean::class, true)),

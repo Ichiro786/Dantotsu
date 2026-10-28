@@ -128,6 +128,21 @@ abstract class AnimeParser : BaseParser() {
     }
 
     /**
+     * [loadByVideoServers] for playback: parsers that can list a server before its link is
+     * resolved (extension sources) may do so when [resolveLazily] is true, and the link is
+     * resolved when the server is picked. The default ignores the flag.
+     * **/
+    open suspend fun loadByVideoServers(
+        episodeUrl: String,
+        extra: Map<String, String>?,
+        sEpisode: SEpisode,
+        resolveLazily: Boolean,
+        callback: (VideoExtractor) -> Unit
+    ) {
+        loadByVideoServers(episodeUrl, extra, sEpisode, callback)
+    }
+
+    /**
      * This Function used when there "is" a default Server set by the user, only loads a Single Server for faster response.
      *
      * Doesn't need to be overridden, if the parser is following the norm.

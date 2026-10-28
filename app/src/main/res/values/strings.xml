@@ -297,6 +297,7 @@
 
     <string name="auto">Auto</string>
     <string name="auto_play_next_episode">Autoplay Next Episode</string>
+    <string name="use_cronet_player">Use Cronet (HTTP/3) for streams</string>
     <string name="auto_play_next_episode_info">Automatically disables if there is no interaction with player after 1 hour.</string>
     <string name="auto_skip_fillers">Auto Skip Fillers</string>
     <string name="auto_skip_fillers_info">Skips filler episodes when going to next episode.</string>
@@ -663,6 +664,7 @@
     <string name="ok">OK</string>
     <string name="reset">Reset</string>
     <string name="close">Close</string>
+    <string name="open_in_webview">Open in WebView</string>
     <string name="no_chapter">No Chapter</string>
     <string name="content_18">Turn on 18+ content from your Anilist settings</string>
     <string name="available">Available</string>

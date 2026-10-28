@@ -156,6 +156,16 @@ internal class ExtensionGithubApi {
             }
         }
 
+        // Try the endpoint that answered last time first: candidates used to be tried one
+        // after another on every refresh (several failed requests per repo).
+        val endpointKey = "repoEndpoint_${mediaType.name}_${cleanBase.hashCode()}"
+        val knownEndpoint = runCatching {
+            PrefManager.getNullableCustomVal(endpointKey, null, String::class.java)
+        }.getOrNull()
+        if (knownEndpoint != null && candidateUrls.remove(knownEndpoint)) {
+            candidateUrls.add(0, knownEndpoint)
+        }
+
         for (targetUrl in candidateUrls) {
             try {
                 val response = try {
@@ -172,6 +182,9 @@ internal class ExtensionGithubApi {
                 val responseBytes = rawBytes.decompressIfGzipped()
                 if (responseBytes.isEmpty()) continue
                 val firstByte = responseBytes[0]
+                if (targetUrl != knownEndpoint) {
+                    runCatching { PrefManager.setCustomVal(endpointKey, targetUrl) }
+                }
 
                 if (firstByte == 0x5B.toByte()) { // '[' - JSON array of extensions
                     val bodyString = responseBytes.toString(Charsets.UTF_8)

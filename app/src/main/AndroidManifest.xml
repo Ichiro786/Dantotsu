@@ -176,6 +176,10 @@
                 <data android:pathPattern=".*\\.epub" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".others.webview.SourceWebViewActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:exported="false" />
         <activity android:name=".others.calc.CalcActivity"
             android:parentActivityName=".MainActivity" />
         <activity

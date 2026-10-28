@@ -4,6 +4,10 @@ import eu.kanade.tachiyomi.animesource.AnimeCatalogueSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
 import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.HttpServer
+import eu.kanade.tachiyomi.animesource.model.ThumbnailInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -427,6 +431,40 @@ abstract class AnimeHttpSource : AnimeCatalogueSource {
      */
     open suspend fun resolveVideo(video: Video): Video? {
         return video
+    }
+
+    /**
+     * Enable the use of a local http server. Return an instance of HttpServer; the app starts
+     * it before playback and stops it when the video changes or the player closes. Videos
+     * that use it carry [HttpServer.PLACEHOLDER_URL] in their urls ([Video.usesHttpServer]).
+     *
+     * @since extensions-lib 17
+     */
+    open fun createHttpServer(): HttpServer? {
+        return null
+    }
+
+    /**
+     * Return info for thumbnails to be used as a preview when seeking.
+     * The host does not use this yet; present so lib 17 overrides link.
+     *
+     * @since extensions-lib 17
+     */
+    open suspend fun getVideoThumbnails(video: Video): ThumbnailInfo? {
+        return null
+    }
+
+    /**
+     * Return bitmap for the image tiles.
+     *
+     * @since extensions-lib 17
+     */
+    open suspend fun getImageTile(url: String): Bitmap? = withIOContext {
+        runCatching {
+            client.newCall(GET(url, headers)).execute().use { response ->
+                response.body.byteStream().use { BitmapFactory.decodeStream(it) }
+            }
+        }.getOrNull()
     }
 
     /**
