@@ -63,6 +63,7 @@ import ani.dantotsu.media.Media
 import ani.dantotsu.media.MediaDetailsViewModel
 import ani.dantotsu.media.MediaNameAdapter
 import ani.dantotsu.media.MediaSingleton
+import ani.dantotsu.media.manga.MangaImageFetcher
 import ani.dantotsu.media.manga.MangaCache
 import ani.dantotsu.media.manga.MangaChapter
 import ani.dantotsu.media.emptyMedia
@@ -143,6 +144,23 @@ class MangaReaderActivity : AppCompatActivity() {
     var webGpuReaderView: WebGpuReaderView? = null
         private set
 
+    /** Chapter whose saved page [currentChapterPage] holds (a settings change keeps it in memory). */
+    private var appliedChapterKey: String? = null
+
+    /** Chapter/page saved in onSaveInstanceState, applied once when the activity is recreated. */
+    private var restoredChapterKey: String? = null
+    private var restoredChapterKeyForPage: String? = null
+    private var restoredPage: Long = 0L
+
+    // Seekbar drags in the WebGPU reader: jump at most every SEEK_DEBOUNCE_MS, and on release.
+    private val seekHandler = Handler(Looper.getMainLooper())
+    private var pendingSeekPage = -1
+    private val seekRunnable = Runnable {
+        val page = pendingSeekPage
+        pendingSeekPage = -1
+        if (page > 0) webGpuReaderView?.scrollToPage(page)
+    }
+
     private var isContVisible = false
     private var showProgressDialog = true
 
@@ -194,6 +212,7 @@ class MangaReaderActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        persistCurrentPage()
         if (autoScrollHelper.isRunning) {
             autoScrollHelper.stop()
         }
@@ -212,6 +231,10 @@ class MangaReaderActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (MangaImageFetcher.onPageCountChanged === pageCountListener) {
+            MangaImageFetcher.onPageCountChanged = null
+        }
+        seekHandler.removeCallbacksAndMessages(null)
         webGpuReaderView?.destroy()
         webGpuReaderView = null
         autoScrollHelper.destroy()
@@ -246,6 +269,58 @@ class MangaReaderActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
+        if (::chapter.isInitialized) {
+            outState.putString(STATE_CHAPTER, chapter.uniqueNumber())
+            outState.putLong(STATE_PAGE, currentChapterPage)
+        }
+    }
+
+    /**
+     * singleTask: opening another chapter while the reader is still alive arrives here instead of
+     * onCreate. It used to be ignored (the old chapter stayed open); now the reader saves its
+     * place and restarts on the new media/chapter.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val newMedia = MediaSingleton.media ?: return
+        MediaSingleton.media = null
+        persistCurrentPage()
+        model.resetMangaChapter()
+        model.setMedia(newMedia)
+        ignoreSavedState = true
+        recreate()
+    }
+
+    /** Writes the current page of the current chapter now (pause, chapter change). */
+    private fun persistCurrentPage() {
+        if (!::media.isInitialized || !::chapter.isInitialized) return
+        val page = currentChapterPage
+        if (page <= 0) return
+        PrefManager.setCustomVal("${media.id}_${chapter.number}", page)
+        MediaNameAdapter.findChapterNumber(chapter.number)?.let {
+            val clean = if (it % 1 == 0f) it.toInt().toString() else it.toString()
+            PrefManager.setCustomVal("${media.id}_$clean", page)
+        }
+    }
+
+    /** A refreshed page list came back with another page count: reload that chapter whole. */
+    private val pageCountListener: (eu.kanade.tachiyomi.source.model.SChapter) -> Unit = { sChapter ->
+        lifecycleScope.launch(Dispatchers.Main) {
+            if (isFinishing || isDestroyed || !::chapters.isInitialized) return@launch
+            val target = chapters.values.firstOrNull { it.sChapter === sChapter }
+                ?: chapters.values.firstOrNull { it.sChapter.url == sChapter.url }
+                ?: return@launch
+            val selected = media.selected ?: return@launch
+            val ok = withContext(Dispatchers.IO) { model.reloadMangaChapterImages(target, selected) }
+            if (!ok || isFinishing || isDestroyed) return@launch
+            val gpu = webGpuReaderView
+            if (gpu != null) {
+                if (gpu.hasChapter(target)) gpu.rebind()
+            } else if (target.uniqueNumber() == chapter.uniqueNumber()) {
+                applySettings(rebindReader = true)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -260,6 +335,14 @@ class MangaReaderActivity : AppCompatActivity() {
 
 
         defaultSettings = loadReaderSettings("reader_settings") ?: defaultSettings
+
+        if (savedInstanceState != null && !ignoreSavedState) {
+            restoredChapterKey = savedInstanceState.getString(STATE_CHAPTER)
+            restoredChapterKeyForPage = restoredChapterKey
+            restoredPage = savedInstanceState.getLong(STATE_PAGE, 0L)
+        }
+        ignoreSavedState = false
+        MangaImageFetcher.onPageCountChanged = pageCountListener
 
         onBackPressedDispatcher.addCallback(this) {
             if (!::media.isInitialized || media.manga == null) {
@@ -302,7 +385,10 @@ class MangaReaderActivity : AppCompatActivity() {
             if (fromUser) {
                 sliding = true
                 if (webGpuReaderView != null && binding.mangaReaderWebGpuContainer.isVisible) {
-                    webGpuReaderView?.scrollToPage(value.toInt())
+                    // Debounced: each jump re-prioritises page loading, a drag shouldn't fire dozens.
+                    pendingSeekPage = value.toInt()
+                    seekHandler.removeCallbacks(seekRunnable)
+                    seekHandler.postDelayed(seekRunnable, SEEK_DEBOUNCE_MS)
                 } else if (defaultSettings.layout != PAGED) {
                     val pos = imageAdapter?.findPositionForPage(chapter, value.toInt())
                     if (pos != null && pos >= 0) {
@@ -325,13 +411,25 @@ class MangaReaderActivity : AppCompatActivity() {
             }
         }
 
+        binding.mangaReaderSlider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: Slider) {}
+            override fun onStopTrackingTouch(slider: Slider) {
+                if (pendingSeekPage > 0) {
+                    seekHandler.removeCallbacks(seekRunnable)
+                    seekRunnable.run()
+                }
+            }
+        })
+
         val currentMedia = model.getMedia().value
         media = if (currentMedia == null || currentMedia.manga == null)
             try {
                 //(intent.getSerialized("media")) ?: return
-                MediaSingleton.media ?: return
+                // Gone after process death: close instead of showing an empty reader.
+                MediaSingleton.media ?: run { finish(); return }
             } catch (e: Exception) {
                 logError(e)
+                finish()
                 return
             } finally {
                 MediaSingleton.media = null
@@ -353,8 +451,9 @@ class MangaReaderActivity : AppCompatActivity() {
         )
         defaultSettings = loadReaderSettings("${media.id}_current_settings") ?: defaultSettings
 
-        chapters = media.manga?.chapters ?: return
-        chapter = chapters[media.manga!!.selectedChapter!!.uniqueNumber()] ?: return
+        chapters = media.manga?.chapters ?: run { finish(); return }
+        chapter = media.manga?.selectedChapter?.uniqueNumber()?.let { chapters[it] }
+            ?: run { finish(); return }
 
         model.mangaReadSources = if (media.isAdult) HMangaSources else MangaSources
         binding.mangaReaderSource.isVisible = PrefManager.getVal(PrefName.ShowSource)
@@ -401,10 +500,9 @@ class MangaReaderActivity : AppCompatActivity() {
         //Chapter Change
         fun change(index: Int) {
             mangaCache.clearBitmaps()
-            PrefManager.setCustomVal(
-                "${media.id}_${chaptersArr[currentChapterIndex]}",
-                currentChapterPage
-            )
+            // Same keys as everywhere else (chapter number / clean number); this used the
+            // "number-scanlator" key nothing reads, so the page was lost on a chapter switch.
+            persistCurrentPage()
             ChapterLoaderDialog.newInstance(chapters[chaptersArr[index]]!!)
                 .show(supportFragmentManager, "dialog")
         }
@@ -531,7 +629,13 @@ class MangaReaderActivity : AppCompatActivity() {
             }
         }
 
-        model.getMangaChapter().observe(this) { chap ->
+        model.getMangaChapter().observe(this) { posted ->
+            // Recreated (rotation, process kept): continue in the chapter that was on screen, which
+            // continuous reading may have moved past the last explicitly opened one.
+            val chap = restoredChapterKey?.let { key ->
+                restoredChapterKey = null
+                chapters[key]?.takeIf { it.images().isNotEmpty() && key != posted?.uniqueNumber() }
+            } ?: posted
             if (chap != null) {
                 chapter = chap
                 media.manga!!.selectedChapter = chapter
@@ -546,7 +650,7 @@ class MangaReaderActivity : AppCompatActivity() {
                     chaptersTitleArr.getOrNull(currentChapterIndex + 1) ?: ""
                 binding.mangaReaderPrevChap.text =
                     chaptersTitleArr.getOrNull(currentChapterIndex - 1) ?: ""
-                applySettings()
+                applySettings(rebindReader = true)
                 checkSmartDownloadManga(chap)
                 val context = this
                 val offline: Boolean = PrefManager.getVal(PrefName.OfflineMode)
@@ -606,7 +710,8 @@ class MangaReaderActivity : AppCompatActivity() {
     }
 
     @SuppressLint("ClickableViewAccessibility")
-    fun applySettings() {
+    fun applySettings(rebindReader: Boolean = false) {
+        val useWebGpu = defaultSettings.webGpuRenderer && WebGpuManager.isSupported(this)
 
         saveReaderSettings("${media.id}_current_settings", defaultSettings)
         hideSystemBars()
@@ -623,7 +728,16 @@ class MangaReaderActivity : AppCompatActivity() {
 
         binding.mangaReaderPager.unregisterOnPageChangeCallback(pageChangeCallback)
 
-        currentChapterPage = PrefManager.getCustomVal("${media.id}_${chapter.number}", 1L)
+        val chapterKey = chapter.uniqueNumber()
+        if (restoredPage > 0 && chapterKey == restoredChapterKeyForPage) {
+            currentChapterPage = restoredPage
+            restoredPage = 0L
+            restoredChapterKeyForPage = null
+        } else if (chapterKey != appliedChapterKey || currentChapterPage <= 0) {
+            // A settings change keeps the page in memory: the async pref write may not have landed.
+            currentChapterPage = PrefManager.getCustomVal("${media.id}_${chapter.number}", 1L)
+        }
+        appliedChapterKey = chapterKey
 
         val chapImages = if (directionPagedBT) {
             chapter.images().reversed()
@@ -650,14 +764,22 @@ class MangaReaderActivity : AppCompatActivity() {
                 chaptersArr.getOrNull(prevIndex)?.let { chapters[it] }
             } else null
 
-            imageAdapter =
-                dualPage { DualPageAdapter(this, chapter, nextChapter, prevChapter) } ?: ImageAdapter(this, chapter, nextChapter, prevChapter)
+            if (!useWebGpu) {
+                imageAdapter =
+                    dualPage { DualPageAdapter(this, chapter, nextChapter, prevChapter) } ?: ImageAdapter(this, chapter, nextChapter, prevChapter)
 
-            if (defaultSettings.layout != PAGED && nextChapter != null) {
-                preloadChapterAndAppend(nextChapter)
-            }
-            if (defaultSettings.layout != PAGED && prevChapter != null) {
-                preloadChapterAndPrepend(prevChapter)
+                if (defaultSettings.layout != PAGED && nextChapter != null) {
+                    preloadChapterAndAppend(nextChapter)
+                }
+                if (defaultSettings.layout != PAGED && prevChapter != null) {
+                    preloadChapterAndPrepend(prevChapter)
+                }
+            } else if (imageAdapter != null) {
+                // The WebGPU reader loads its own pages: don't keep a classic adapter (and its
+                // page loads / bitmaps) alive behind it.
+                imageAdapter = null
+                binding.mangaReaderRecycler.adapter = null
+                binding.mangaReaderPager.adapter = null
             }
 
             if (chapImages.size > 1) {
@@ -788,7 +910,7 @@ class MangaReaderActivity : AppCompatActivity() {
             }
         }
 
-        if (defaultSettings.webGpuRenderer && WebGpuManager.isSupported(this)) {
+        if (useWebGpu) {
             binding.mangaReaderRecyclerContainer.visibility = View.GONE
             binding.mangaReaderPager.visibility = View.GONE
             binding.mangaReaderWebGpuContainer.visibility = View.VISIBLE
@@ -799,7 +921,9 @@ class MangaReaderActivity : AppCompatActivity() {
             val isReversed = directionRLBT
 
             val currentGpu = webGpuReaderView
+            var needsBind = rebindReader
             if (currentGpu == null || currentGpu.isContinuous != isContinuous || currentGpu.isVertical != isVertical || currentGpu.isReversed != isReversed) {
+                needsBind = true
                 currentGpu?.destroy()
                 binding.mangaReaderWebGpuContainer.removeAllViews()
                 val newGpu = WebGpuReaderView(this, isContinuous = isContinuous, isVertical = isVertical, isReversed = isReversed)
@@ -813,7 +937,15 @@ class MangaReaderActivity : AppCompatActivity() {
                 webGpuReaderView = newGpu
             }
             binding.mangaReaderSwipy.child = webGpuReaderView?.viewer
-            webGpuReaderView?.bind(chapter, currentPage)
+            val gpu = webGpuReaderView
+            // Most settings (padding, controls, keep-screen-on, colours...) don't touch the pages:
+            // rebinding dropped every decoded page and re-downloaded them. Only a new chapter, a new
+            // viewer or a decode setting (crop borders) rebuilds the timeline.
+            if (gpu != null && (needsBind || !gpu.hasChapter(chapter) ||
+                    gpu.boundCropBorders != defaultSettings.cropBorders)
+            ) {
+                gpu.bind(chapter, currentPage)
+            }
 
             onVolumeUp = {
                 webGpuReaderView?.scrollUp()
@@ -1346,7 +1478,8 @@ class MangaReaderActivity : AppCompatActivity() {
 
     private val loading = AtomicBoolean(false)
     private val pagePersistLock = Any()
-    private var pagePersistSeq = 0L
+    /** Per chapter: a newer write for one chapter must not drop the last write of another. */
+    private val pagePersistSeq = HashMap<String, Long>()
     fun updatePageNumber(pageNumber: Long) {
         var page = pageNumber
         if (directionPagedBT) {
@@ -1359,10 +1492,12 @@ class MangaReaderActivity : AppCompatActivity() {
             currentChapterPage = page
             triggerEInkFlash()
             val chapNum = chapter.number
-            val seq = synchronized(pagePersistLock) { ++pagePersistSeq }
+            val seq = synchronized(pagePersistLock) {
+                ((pagePersistSeq[chapNum] ?: 0L) + 1L).also { pagePersistSeq[chapNum] = it }
+            }
             scope.launch(Dispatchers.IO) {
-                // Drop stale writes so rapid page turns persist in order (last-writer-wins)
-                if (seq != synchronized(pagePersistLock) { pagePersistSeq }) return@launch
+                // Drop stale writes of this chapter so rapid page turns persist in order
+                if (seq != synchronized(pagePersistLock) { pagePersistSeq[chapNum] }) return@launch
                 PrefManager.setCustomVal("${media.id}_$chapNum", page)
                 val cleanChapNum = MediaNameAdapter.findChapterNumber(chapNum)?.let {
                     if (it % 1 == 0f) it.toInt().toString() else it.toString()
@@ -1379,7 +1514,8 @@ class MangaReaderActivity : AppCompatActivity() {
                 )
             }
         }
-        if (maxChapterPage - currentChapterPage <= 1 && loading.compareAndSet(false, true))
+        // (The WebGPU reader preloads the next chapter itself, through the shared chapter loader.)
+        if (webGpuReaderView == null && maxChapterPage - currentChapterPage <= 1 && loading.compareAndSet(false, true))
             scope.launch(Dispatchers.IO) {
                 try {
                     model.loadMangaChapterImages(
@@ -1817,6 +1953,10 @@ class MangaReaderActivity : AppCompatActivity() {
             }
 
             chapter = newChapter
+            appliedChapterKey = newChapter.uniqueNumber()
+            // Forces updatePageNumber below to persist this chapter's page even when it has the
+            // same number as the page we left in the other chapter.
+            currentChapterPage = 0L
             media.manga?.selectedChapter = chapter
             currentChapterIndex = chaptersArr.indexOf(chapter.uniqueNumber())
             PrefManager.setCustomVal("${media.id}_current_chp", chapter.number)
@@ -1941,4 +2081,15 @@ class MangaReaderActivity : AppCompatActivity() {
             this.valueFrom = from
         }
     }
+
+    private companion object {
+        const val STATE_CHAPTER = "reader_chapter"
+        const val STATE_PAGE = "reader_page"
+        const val SEEK_DEBOUNCE_MS = 120L
+
+        /** Set by onNewIntent so the recreated reader ignores the old chapter's saved state. */
+        @Volatile
+        var ignoreSavedState = false
+    }
+
 }

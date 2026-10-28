@@ -55,26 +55,13 @@ class InstalledAnimeExtensionsFragment : Fragment(), SearchQueryHandler {
     private val extensionsAdapter = AnimeExtensionsAdapter(
         { pkg ->
             val name = pkg.name
-            val changeUIVisibility: (Boolean) -> Unit = { show ->
-                val activity = activity as? ExtensionsActivity
-                if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
-                    activity.findViewById<ViewPager2>(R.id.viewPager).isVisible = show
-                    activity.findViewById<TabLayout>(R.id.tabLayout).isVisible = show
-                    activity.findViewById<TextInputLayout>(R.id.searchView).isVisible = show
-                    activity.findViewById<ImageView>(R.id.languageselect).isVisible = show
-                    activity.findViewById<TextView>(R.id.extensions).text =
-                        if (show) activity.getString(R.string.extensions) else name
-                    activity.findViewById<FrameLayout>(R.id.fragmentExtensionsContainer).isGone = show
-                }
-            }
+            val changeUIVisibility: (Boolean) -> Unit = { show -> setPrefsUiVisible(show, name) }
             var itemSelected = false
             val allSettings = pkg.sources.filterIsInstance<ConfigurableAnimeSource>()
             if (allSettings.isNotEmpty()) {
                 val openPrefFragment: (ConfigurableAnimeSource) -> Unit = { source ->
                     changeUIVisibility(false)
-                    val fragment = AnimeSourcePreferencesFragment().getInstance(source.id) {
-                        changeUIVisibility(true)
-                    }
+                    val fragment = AnimeSourcePreferencesFragment.newInstance(source.id)
                     parentFragmentManager.beginTransaction()
                         .setCustomAnimations(R.anim.slide_up, R.anim.slide_down)
                         .replace(R.id.fragmentExtensionsContainer, fragment)
@@ -166,6 +153,28 @@ class InstalledAnimeExtensionsFragment : Fragment(), SearchQueryHandler {
             }
         }, skipIcons
     )
+
+    /** Shows/hides the extension list around the source settings container. */
+    private fun setPrefsUiVisible(show: Boolean, title: String?) {
+        val activity = activity as? ExtensionsActivity
+        if (activity != null && !activity.isFinishing && !activity.isDestroyed) {
+            activity.findViewById<ViewPager2>(R.id.viewPager).isVisible = show
+            activity.findViewById<TabLayout>(R.id.tabLayout).isVisible = show
+            activity.findViewById<TextInputLayout>(R.id.searchView).isVisible = show
+            activity.findViewById<ImageView>(R.id.languageselect).isVisible = show
+            activity.findViewById<TextView>(R.id.extensions).text =
+                if (show) activity.getString(R.string.extensions) else (title ?: activity.getString(R.string.extensions))
+            activity.findViewById<FrameLayout>(R.id.fragmentExtensionsContainer).isGone = show
+        }
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        // Source settings report their real close here (survives rotation / process death).
+        parentFragmentManager.setFragmentResultListener(
+            AnimeSourcePreferencesFragment.REQUEST_KEY_CLOSED, viewLifecycleOwner
+        ) { _, _ -> setPrefsUiVisible(true, null) }
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater,

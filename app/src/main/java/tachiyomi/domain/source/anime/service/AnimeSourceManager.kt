@@ -18,5 +18,14 @@ interface AnimeSourceManager {
 
     fun getCatalogueSources(): List<AnimeCatalogueSource>
 
+    /**
+     * True once the source map reflects the extension manager's loaded extensions. Before that,
+     * [get] can return null for an installed source (e.g. right after a process restore).
+     */
+    val isInitialized: Boolean get() = true
+
+    /** Suspends until [isInitialized]. */
+    suspend fun awaitInitialized() {}
+
     fun getStubSources(): List<StubAnimeSource>
 }

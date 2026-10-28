@@ -24,68 +24,56 @@ data class ImageData(
     val page: Page,
     val source: HttpSource
 ) {
-    /** Like Mihon, a failed page (expired/signed url) gets its url refreshed from the source once. */
+    /**
+     * The page as a bitmap, through its source (headers, rate limit, interceptors), the reader's
+     * disk cache, and - like Mihon - one url refresh for an expired/signed url.
+     */
     suspend fun fetchAndProcessImage(
         page: Page,
         httpSource: HttpSource
-    ): Bitmap? = MangaImageFetcher.withPageRefresh(page, httpSource) {
-        fetchAndProcessImageOnce(page, httpSource)
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        try {
+            // Pages whose image url needs its own request are resolved here, on first load.
+            MangaImageFetcher.ensureImageUrl(page, httpSource)
+            val originalUrl = page.imageUrl
+            if (originalUrl != null && !MangaImageFetcher.isDataUri(originalUrl)) {
+                val compressedUrl = createDataSaver().compress(originalUrl)
+                if (compressedUrl != originalUrl) {
+                    fetchDataSaver(page, httpSource, originalUrl, compressedUrl)?.let { return@withContext it }
+                    Logger.log("DataSaver failed or was blocked by Cloudflare; falling back to original URL: $originalUrl")
+                }
+            }
+            val bytes = MangaImageFetcher.fetchFromSource(page, httpSource) ?: return@withContext null
+            // Bytes first, then BitmapFactory with a libvips fallback (AVIF/JXL/HEIF).
+            MangaImageFetcher.decodeBitmap(bytes)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Logger.log("MangaCache image fetch error: ${e.message}")
+            null
+        }
     }
 
-    private suspend fun fetchAndProcessImageOnce(
+    private suspend fun fetchDataSaver(
         page: Page,
-        httpSource: HttpSource
+        httpSource: HttpSource,
+        originalUrl: String,
+        compressedUrl: String
     ): Bitmap? {
-        return withContext(Dispatchers.IO) {
-            try {
-                // Pages whose image url needs its own request are resolved here, on first load.
-                MangaImageFetcher.ensureImageUrl(page, httpSource)
-                val originalUrl = page.imageUrl ?: return@withContext null
-                if (MangaImageFetcher.isDataUri(originalUrl)) {
-                    return@withContext MangaImageFetcher.decodeDataUri(originalUrl)
-                        ?.let { MangaImageFetcher.decodeBitmap(it) }
-                }
-                val dataSaver = createDataSaver()
-                val compressedUrl = dataSaver.compress(originalUrl)
-                var bitmap: Bitmap? = null
-
-                if (compressedUrl != originalUrl) {
-                    try {
-                        page.imageUrl = compressedUrl
-                        val response = httpSource.getImage(page)
-                        Logger.log("DataSaver Response: ${response.code} - ${response.message}")
-                        bitmap = response.use {
-                            if (it.isSuccessful) MangaImageFetcher.decodeBitmap(it.body.bytes()) else null
-                        }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Logger.log("DataSaver failed, falling back to original: ${e.message}")
-                    } finally {
-                        page.imageUrl = originalUrl
-                    }
-                }
-
-                if (bitmap == null) {
-                    if (compressedUrl != originalUrl) {
-                        Logger.log("DataSaver failed or was blocked by Cloudflare; falling back to original URL: $originalUrl")
-                    }
-                    val response = httpSource.getImage(page)
-                    Logger.log("Response: ${response.code} - ${response.message}")
-                    // Bytes first, then BitmapFactory with a libvips fallback (AVIF/JXL/HEIF the
-                    // platform can't decode used to come back null here).
-                    bitmap = response.use {
-                        if (it.isSuccessful) MangaImageFetcher.decodeBitmap(it.body.bytes()) else null
-                    }
-                }
-
-                return@withContext bitmap
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Logger.log("MangaCache image fetch error: ${e.message}")
-                return@withContext null
+        return try {
+            page.imageUrl = compressedUrl
+            val response = httpSource.getImage(page)
+            Logger.log("DataSaver Response: ${response.code} - ${response.message}")
+            response.use {
+                if (it.isSuccessful) MangaImageFetcher.decodeBitmap(it.body.bytes()) else null
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Logger.log("DataSaver failed, falling back to original: ${e.message}")
+            null
+        } finally {
+            page.imageUrl = originalUrl
         }
     }
 }

@@ -115,6 +115,15 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // Source settings report their real close here (survives rotation / process death).
+        parentFragmentManager.setFragmentResultListener(
+            AnimeSourcePreferencesFragment.REQUEST_KEY_CLOSED, viewLifecycleOwner
+        ) { _, _ ->
+            setExtensionSettingsUiVisible(true)
+            if (::media.isInitialized) {
+                media.selected?.sourceIndex?.let { loadEpisodes(it, true) }
+            }
+        }
         val intentFilter = IntentFilter().apply {
             addAction(ACTION_DOWNLOAD_STARTED)
             addAction(ACTION_DOWNLOAD_FINISHED)
@@ -619,18 +628,20 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
         )
     }
 
-    fun openSettings(pkg: AnimeExtension.Installed) {
-        val changeUIVisibility: (Boolean) -> Unit = { show ->
-            val activity = activity
-            if (activity is MediaDetailsActivity && isAdded) {
-                activity.findViewById<AppBarLayout>(R.id.mediaAppBar).isVisible = show
-                activity.findViewById<ViewPager2>(R.id.mediaViewPager).isVisible = show
-                activity.findViewById<CardView>(R.id.mediaCover).isVisible = show
-                activity.findViewById<CardView>(R.id.mediaClose).isVisible = show
-                activity.navBar.isVisible = show
-                activity.findViewById<FrameLayout>(R.id.fragmentExtensionsContainer).isGone = show
-            }
+    private fun setExtensionSettingsUiVisible(show: Boolean) {
+        val activity = activity
+        if (activity is MediaDetailsActivity && isAdded && !activity.isFinishing) {
+            activity.findViewById<AppBarLayout>(R.id.mediaAppBar)?.isVisible = show
+            activity.findViewById<ViewPager2>(R.id.mediaViewPager)?.isVisible = show
+            activity.findViewById<CardView>(R.id.mediaCover)?.isVisible = show
+            activity.findViewById<CardView>(R.id.mediaClose)?.isVisible = show
+            activity.navBar.isVisible = show
+            activity.findViewById<FrameLayout>(R.id.fragmentExtensionsContainer)?.isGone = show
         }
+    }
+
+    fun openSettings(pkg: AnimeExtension.Installed) {
+        val changeUIVisibility: (Boolean) -> Unit = { show -> setExtensionSettingsUiVisible(show) }
         var itemSelected = false
         val allSettings = pkg.sources.filterIsInstance<ConfigurableAnimeSource>()
         if (allSettings.isNotEmpty()) {
@@ -647,10 +658,7 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
                             itemSelected = true
                             requireActivity().runOnUiThread {
                                 val fragment =
-                                    AnimeSourcePreferencesFragment().getInstance(selectedSetting.id) {
-                                        changeUIVisibility(true)
-                                        loadEpisodes(media.selected!!.sourceIndex, true)
-                                    }
+                                    AnimeSourcePreferencesFragment.newInstance(selectedSetting.id)
                                 parentFragmentManager.beginTransaction()
                                     .setCustomAnimations(R.anim.slide_up, R.anim.slide_down)
                                     .replace(R.id.fragmentExtensionsContainer, fragment)
@@ -669,10 +677,7 @@ class AnimeWatchFragment : Fragment(), AnimeWatchAdapter.ScanlatorSelectionListe
                 // If there's only one setting, proceed with the fragment transaction
                 requireActivity().runOnUiThread {
                     val fragment =
-                        AnimeSourcePreferencesFragment().getInstance(selectedSetting.id) {
-                            changeUIVisibility(true)
-                            loadEpisodes(media.selected!!.sourceIndex, true)
-                        }
+                        AnimeSourcePreferencesFragment.newInstance(selectedSetting.id)
                     parentFragmentManager.beginTransaction().apply {
                         setCustomAnimations(R.anim.slide_up, R.anim.slide_down)
                         replace(R.id.fragmentExtensionsContainer, fragment)

@@ -109,9 +109,11 @@ abstract class BaseImageAdapter(
     /** Laid-out main-axis size of each loaded page (continuous modes), keyed by [itemSizeKey]. */
     protected val knownItemSize = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
+    // Keyed by chapter + page position, which never changes: urls could repeat across chapters
+    // (lazily resolved pages are keyed "page:<index>") and change when a page list is reloaded.
     protected fun itemSizeKey(position: Int): String? = when (val item = items.getOrNull(position)) {
-        is ReaderItem.Page -> item.image.url.url
-        is ReaderItem.DualPage -> item.first.url.url + "|" + (item.second?.url?.url ?: "")
+        is ReaderItem.Page -> "${item.chapter.uniqueNumber()}#${item.pageNumber}"
+        is ReaderItem.DualPage -> "${item.chapter.uniqueNumber()}#d${item.pageNumber}"
         else -> null
     }
 
@@ -418,7 +420,9 @@ abstract class BaseImageAdapter(
                                 imageData.source
                             )
                             val headers = MangaImageFetcher.validHeaders(link.headers)
-                            cachedBitmap ?: if (!link.url.startsWith("http")) null else run {
+                            // A page with a source never falls back to a plain request: that skipped
+                            // the source's headers, rate limit and descramble interceptors.
+                            cachedBitmap ?: if (imageData != null || !link.url.startsWith("http")) null else run {
                                 val glideBitmap = try {
                                     Glide.with(this@loadBitmap)
                                         .asBitmap()

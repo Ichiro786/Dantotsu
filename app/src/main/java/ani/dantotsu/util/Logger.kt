@@ -208,13 +208,17 @@ class FinalExceptionHandler : Thread.UncaughtExceptionHandler {
 
         if (App.instance?.applicationContext != null) {
             App.instance?.applicationContext?.let { ctx ->
-                val lastLoadedActivity = App.instance?.mFTActivityLifecycleCallbacks?.lastActivity
+                val callbacks = App.instance?.mFTActivityLifecycleCallbacks
+                val lastLoadedActivity = callbacks?.lastActivity
+                val resumedActivity = callbacks?.resumedActivity
 
                 // --- crash report (same as before) ---
                 val report = StringBuilder()
                 report.append(getDeviceAndAppInfo(ctx))
                 report.append("Thread: ${t.name}\n")
-                report.append("Activity: ${lastLoadedActivity}\n")
+                // The resumed one is what was on screen; the last created can be a background one.
+                report.append("Activity: ${resumedActivity ?: lastLoadedActivity}\n")
+                report.append("Last created activity: ${lastLoadedActivity}\n")
                 report.append("Exception: ${e.message}\n")
                 report.append("Stack trace:\n")
                 report.append(stackTraceString)

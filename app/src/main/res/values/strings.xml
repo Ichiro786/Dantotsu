@@ -187,6 +187,7 @@
     <string name="chaps">Chapters</string>
     <string name="chap">Chapter</string>
     <string name="wrong"><u>Wrong Title?</u></string>
+    <string name="extension_source_unavailable">This extension isn\'t available right now. It may have been uninstalled.</string>
     <string name="source_not_found">
         Nothing came up from this source.\n
         Let\'s look elsewhere.

@@ -107,6 +107,8 @@ open class ImageAdapter(
 
         val errorView = parent.findViewById<View>(R.id.imgProgError)
 
+        // Captured now: a chapter prepended while this page loads shifts every position.
+        val sizeKey = itemSizeKey(position)
         parent.setTag(R.id.imgProgImageNoGestures, null)
         imageView.recycle()
         imageView.visibility = View.GONE
@@ -147,12 +149,12 @@ open class ImageAdapter(
                     sHeight =
                         if (settings.wrapImages) bitmap.height else (sWidth * bitmap.height * 1f / bitmap.width).toInt()
                     height = sHeight
-                    itemSizeKey(position)?.let { knownItemSize[it] = sHeight }
+                    sizeKey?.let { knownItemSize[it] = sHeight }
                 } else {
                     sWidth =
                         if (settings.wrapImages) bitmap.width else (sHeight * bitmap.width * 1f / bitmap.height).toInt()
                     width = sWidth
-                    itemSizeKey(position)?.let { knownItemSize[it] = sWidth }
+                    sizeKey?.let { knownItemSize[it] = sWidth }
                 }
             }
 

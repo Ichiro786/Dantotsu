@@ -1061,6 +1061,14 @@ class MediaDetailsViewModel : ViewModel() {
 
     private val mangaChapter = MutableLiveData<MangaChapter?>(null)
     fun getMangaChapter(): LiveData<MangaChapter?> = mangaChapter
+
+    /** Forgets the last opened chapter (the reader re-opened with a new one). */
+    fun resetMangaChapter() {
+        mangaChapter.value = null
+    }
+    /** One page-list request per chapter at a time, shared by every caller (reader, preloads, dialog). */
+    private val chapterImageLoads = java.util.concurrent.ConcurrentHashMap<String, Deferred<Boolean>>()
+
     suspend fun loadMangaChapterImages(
         chapter: MangaChapter,
         selected: Selected,
@@ -1070,23 +1078,64 @@ class MediaDetailsViewModel : ViewModel() {
         // Already loaded (ChapterLoaderDialog, chapter preloading): addImages() would ignore a
         // second list anyway, so don't fetch the page list again (rate-limited sources took
         // seconds to open the reader, and the re-post re-applied the reader settings).
-        val loaded = chapter.images()
-        if (loaded.isNotEmpty() && loaded.all {
-                it.source != null || !it.url.url.startsWith("http") ||
-                    ani.dantotsu.media.manga.MangaImageFetcher.imageDataFor(it, it.url.url) != null
-            }
-        ) {
+        if (hasUsablePages(chapter)) {
             if (post) mangaChapter.postValue(chapter)
             return true
         }
-        return tryWithSuspend(true) {
-            chapter.addImages(
-                mangaReadSources?.get(selected.sourceIndex)
-                    ?.loadImages(chapter.link, chapter.sChapter) ?: return@tryWithSuspend false
-            )
-            if (post) mangaChapter.postValue(chapter)
+        val ok = sharedChapterLoad("load", chapter, selected) {
+            val list = mangaReadSources?.get(selected.sourceIndex)
+                ?.loadImages(chapter.link, chapter.sChapter) ?: return@sharedChapterLoad false
+            chapter.addImages(list)
+            chapter.images().isNotEmpty()
+        }
+        if (ok && post) mangaChapter.postValue(chapter)
+        return ok
+    }
+
+    /**
+     * Fetches [chapter]'s page list again and replaces it (the source now returns a different
+     * number of pages, so index-by-index url refreshing would mix pages up). Not posted.
+     */
+    suspend fun reloadMangaChapterImages(chapter: MangaChapter, selected: Selected): Boolean =
+        sharedChapterLoad("reload", chapter, selected) {
+            val list = mangaReadSources?.get(selected.sourceIndex)
+                ?.loadImages(chapter.link, chapter.sChapter) ?: return@sharedChapterLoad false
+            if (list.isEmpty()) return@sharedChapterLoad false
+            chapter.replaceImages(list)
             true
-        } ?: false
+        }
+
+    private fun hasUsablePages(chapter: MangaChapter): Boolean {
+        val loaded = chapter.images()
+        return loaded.isNotEmpty() && loaded.all {
+            it.source != null || !it.url.url.startsWith("http") ||
+                ani.dantotsu.media.manga.MangaImageFetcher.imageDataFor(it, it.url.url) != null
+        }
+    }
+
+    private suspend fun sharedChapterLoad(
+        kind: String,
+        chapter: MangaChapter,
+        selected: Selected,
+        block: suspend () -> Boolean
+    ): Boolean {
+        val key = "$kind|${selected.sourceIndex}|${chapter.uniqueNumber()}|${chapter.link}"
+        // Atomic: a running load is shared, a finished one (success or failure) is replaced.
+        val load = chapterImageLoads.compute(key) { _, running ->
+            running?.takeIf { !it.isCompleted }
+                ?: viewModelScope.async(Dispatchers.IO, start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                    tryWithSuspend(true) { block() } ?: false
+                }
+        }!!
+        return try {
+            load.await()
+        } catch (e: CancellationException) {
+            // This caller went away (or the view model was cleared); the shared load is unaffected
+            // unless the view model's scope itself was cancelled.
+            throw e
+        } finally {
+            if (load.isCompleted) chapterImageLoads.remove(key, load)
+        }
     }
 
     fun loadTransformation(mangaImage: MangaImage, source: Int): BitmapTransformation? {

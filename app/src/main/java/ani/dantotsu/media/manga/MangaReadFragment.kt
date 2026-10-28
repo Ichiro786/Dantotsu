@@ -112,6 +112,16 @@ open class MangaReadFragment : Fragment(), ScanlatorSelectionListener {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        // Source settings report their real close here (survives rotation / process death,
+        // unlike the old lambda that was captured in the fragment instance).
+        parentFragmentManager.setFragmentResultListener(
+            MangaSourcePreferencesFragment.REQUEST_KEY_CLOSED, viewLifecycleOwner
+        ) { _, _ ->
+            setExtensionSettingsUiVisible(true)
+            if (::media.isInitialized) {
+                media.selected?.sourceIndex?.let { loadChapters(it, true) }
+            }
+        }
         val intentFilter = IntentFilter().apply {
             addAction(ACTION_DOWNLOAD_STARTED)
             addAction(ACTION_DOWNLOAD_FINISHED)
@@ -456,18 +466,20 @@ open class MangaReadFragment : Fragment(), ScanlatorSelectionListener {
         )
     }
 
-    fun openSettings(pkg: MangaExtension.Installed) {
-        val changeUIVisibility: (Boolean) -> Unit = { show ->
-            val activity = activity
-            if (activity is MediaDetailsActivity && isAdded) {
-                activity.findViewById<AppBarLayout>(R.id.mediaAppBar).isVisible = show
-                activity.findViewById<ViewPager2>(R.id.mediaViewPager).isVisible = show
-                activity.findViewById<CardView>(R.id.mediaCover).isVisible = show
-                activity.findViewById<CardView>(R.id.mediaClose).isVisible = show
-                activity.navBar.isVisible = show
-                activity.findViewById<FrameLayout>(R.id.fragmentExtensionsContainer).isGone = show
-            }
+    private fun setExtensionSettingsUiVisible(show: Boolean) {
+        val activity = activity
+        if (activity is MediaDetailsActivity && isAdded && !activity.isFinishing) {
+            activity.findViewById<AppBarLayout>(R.id.mediaAppBar)?.isVisible = show
+            activity.findViewById<ViewPager2>(R.id.mediaViewPager)?.isVisible = show
+            activity.findViewById<CardView>(R.id.mediaCover)?.isVisible = show
+            activity.findViewById<CardView>(R.id.mediaClose)?.isVisible = show
+            activity.navBar.isVisible = show
+            activity.findViewById<FrameLayout>(R.id.fragmentExtensionsContainer)?.isGone = show
         }
+    }
+
+    fun openSettings(pkg: MangaExtension.Installed) {
+        val changeUIVisibility: (Boolean) -> Unit = { show -> setExtensionSettingsUiVisible(show) }
         var itemSelected = false
         val allSettings = pkg.sources.filterIsInstance<ConfigurableSource>()
         if (allSettings.isNotEmpty()) {
@@ -481,11 +493,7 @@ open class MangaReadFragment : Fragment(), ScanlatorSelectionListener {
                         selectedSetting = allSettings[which]
                         itemSelected = true
 
-                        val fragment =
-                            MangaSourcePreferencesFragment().getInstance(selectedSetting.id) {
-                                changeUIVisibility(true)
-                                loadChapters(media.selected!!.sourceIndex, true)
-                            }
+                        val fragment = MangaSourcePreferencesFragment.newInstance(selectedSetting.id)
                         parentFragmentManager.beginTransaction()
                             .setCustomAnimations(R.anim.slide_up, R.anim.slide_down)
                             .replace(R.id.fragmentExtensionsContainer, fragment)
@@ -502,10 +510,7 @@ open class MangaReadFragment : Fragment(), ScanlatorSelectionListener {
                 }
             } else {
                 // If there's only one setting, proceed with the fragment transaction
-                val fragment = MangaSourcePreferencesFragment().getInstance(selectedSetting.id) {
-                    changeUIVisibility(true)
-                    loadChapters(media.selected!!.sourceIndex, true)
-                }
+                val fragment = MangaSourcePreferencesFragment.newInstance(selectedSetting.id)
                 parentFragmentManager.beginTransaction()
                     .setCustomAnimations(R.anim.slide_up, R.anim.slide_down)
                     .replace(R.id.fragmentExtensionsContainer, fragment)

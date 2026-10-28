@@ -176,6 +176,14 @@ class App : Application(), GraphProvider<AppGraph> {
             MangaSources.init(mangaExtensionManager.installedExtensionsFlow, mangaExtensionManager)
         }
         applicationScope.launch(Dispatchers.IO) {
+            // Builds the source managers off the main thread (their first fill is synchronous) so a
+            // screen restored after process death finds its source without waiting.
+            runCatching {
+                Injekt.get<tachiyomi.domain.source.manga.service.MangaSourceManager>()
+                Injekt.get<tachiyomi.domain.source.anime.service.AnimeSourceManager>()
+            }.onFailure { Logger.log(it) }
+        }
+        applicationScope.launch(Dispatchers.IO) {
             novelExtensionManager = Injekt.get()
             launch {
                 // Wait for the installed list instead of a fixed delay, so update checks
@@ -308,6 +316,9 @@ class App : Application(), GraphProvider<AppGraph> {
     inner class FTActivityLifecycleCallbacks : ActivityLifecycleCallbacks {
         var currentActivity: Activity? = null
         var lastActivity: String? = null
+        /** The activity the user was actually looking at (crash reports). */
+        @Volatile
+        var resumedActivity: String? = null
         private var startedActivityCount = 0
 
         override fun onActivityCreated(p0: Activity, p1: Bundle?) {
@@ -322,6 +333,7 @@ class App : Application(), GraphProvider<AppGraph> {
 
         override fun onActivityResumed(p0: Activity) {
             currentActivity = p0
+            resumedActivity = p0.javaClass.simpleName
             updateDiscordPresence(p0)
             applySystemFont(p0)
         }

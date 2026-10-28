@@ -4,7 +4,6 @@ import ani.dantotsu.parsers.MangaChapter
 import ani.dantotsu.parsers.MangaImage
 import eu.kanade.tachiyomi.source.model.SChapter
 import java.io.Serializable
-import kotlin.math.floor
 
 data class MangaChapter(
     val number: String,
@@ -26,18 +25,41 @@ data class MangaChapter(
         chapter.date
     )
 
-    private val images = mutableListOf<MangaImage>()
+    // Read by the reader's loader, render and UI threads while a page list loads on IO: swapped as
+    // whole immutable lists (a shared mutable list threw ConcurrentModificationException).
+    @Volatile
+    private var images: List<MangaImage> = emptyList()
+
+    @Volatile
+    private var dualPages: List<Pair<MangaImage, MangaImage?>> = emptyList()
+
     fun images(): List<MangaImage> = images
+
+    /** Sets the page list once; a second list is ignored (see [replaceImages]). */
+    @Synchronized
     fun addImages(image: List<MangaImage>) {
         if (images.isNotEmpty()) return
-        image.forEach { images.add(it) }
-        (0..floor((images.size.toFloat() - 1f) / 2).toInt()).forEach {
-            val i = it * 2
-            dualPages.add(images[i] to images.getOrNull(i + 1))
-        }
+        setImages(image)
     }
 
-    private val dualPages = mutableListOf<Pair<MangaImage, MangaImage?>>()
+    /** Replaces the page list, e.g. after the source returned a different page count. */
+    @Synchronized
+    fun replaceImages(image: List<MangaImage>) {
+        setImages(image)
+    }
+
+    private fun setImages(image: List<MangaImage>) {
+        val pages = ArrayList(image)
+        val pairs = ArrayList<Pair<MangaImage, MangaImage?>>((pages.size + 1) / 2)
+        var i = 0
+        while (i < pages.size) {
+            pairs.add(pages[i] to pages.getOrNull(i + 1))
+            i += 2
+        }
+        dualPages = pairs
+        images = pages
+    }
+
     fun dualPages(): List<Pair<MangaImage, MangaImage?>> = dualPages
 
     fun uniqueNumber(): String = "${number}-${scanlator ?: "Unknown"}"
