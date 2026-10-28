@@ -839,7 +839,7 @@ class WebGpuReaderView(
      * libvips first (AVIF/JXL/HEIF, animated formats); Android's decoder as a fallback, so a page
      * libvips rejects still shows instead of leaving the loading dot forever.
      */
-    private fun decodeToGpuImage(bytes: ByteArray): ImagePage? {
+    private suspend fun decodeToGpuImage(bytes: ByteArray): ImagePage? {
         val trimColors = if (activity.defaultSettings.cropBorders) {
             listOf(floatArrayOf(1f, 1f, 1f), floatArrayOf(0f, 0f, 0f))
         } else null

@@ -429,7 +429,7 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
     private fun animePageUrl(source: AnimeSource, anime: SAnime): String? =
         (source as? AnimeHttpSource)?.let { src ->
             runCatching { absoluteUrl(src, src.getAnimeUrl(anime)) }.getOrNull()
-                ?: runCatching { src.getHomeUrl() }.getOrNull()
+                ?: runCatching { src.baseUrl }.getOrNull()
         }
 
     /** The extension's own message (often "open in WebView ...") with a WebView action. */
@@ -643,7 +643,14 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
                 emit(null, direct)
             } else {
                 val resolved = coroutineScope {
-                    direct.map { v -> async { semaphore.withPermit { resolveVideo(source, v) } } }.awaitAll()
+                    direct.map { v ->
+                        async {
+                            semaphore.withPermit {
+                                // mark it resolved so emit() doesn't ask the source a second time
+                                resolveVideo(source, v).let { r -> if (isRealUrl(r.videoUrl)) r.copy(initialized = true) else r }
+                            }
+                        }
+                    }.awaitAll()
                 }
                 emit(null, resolved)
             }
@@ -803,7 +810,7 @@ class DynamicAnimeParser(extension: AnimeExtension.Installed) : AnimeParser() {
             Logger.log("Exception in search: $e")
             Logger.log(e)
             // solving the challenge once in the WebView clears it for the source
-            val home = runCatching { (source as? AnimeHttpSource)?.getHomeUrl() }.getOrNull()
+            val home = runCatching { (source as? AnimeHttpSource)?.baseUrl }.getOrNull()
             ani.dantotsu.others.webview.SourceWebViewActivity.showSourceError(
                 name, "Failed to bypass Cloudflare", home, sourceHeadersOf(source)
             )

@@ -152,9 +152,16 @@ class TiledBitmapDecoder : ImageRegionDecoder {
                 size > 4
         }
 
+        /**
+         * HWUI refuses to draw a single bitmap over 100 MB ("Canvas: trying to draw too large
+         * bitmap" crash) whatever the texture limit, e.g. a 2000 x 14000 ARGB strip.
+         */
+        private const val MAX_DRAW_BYTES = 90L * 1024 * 1024
+
         fun needsTiling(bitmap: Bitmap): Boolean {
             val limit = safeDimension
-            return bitmap.width > limit || bitmap.height > limit
+            return bitmap.width > limit || bitmap.height > limit ||
+                bitmap.width.toLong() * bitmap.height * 4L > MAX_DRAW_BYTES
         }
 
         /** Registers [bitmap] and returns the uri to give SSIV (ImageSource.uri). */

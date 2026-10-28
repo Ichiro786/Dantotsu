@@ -969,7 +969,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         list.add(media.id)
         PrefManager.setCustomVal("continueAnimeList", list)
 
-        val ext = episode.extractors?.find { it.server.name == episode.selectedExtractor }
+        val ext = episode.extractors?.find { it.server.name == episode.selectedExtractor && !it.isPlaceholder }
             ?: episode.extractors?.firstOrNull { it.isPreferred && !it.isPlaceholder && !it.needsResolve }
             ?: episode.extractors?.firstOrNull { !it.isPlaceholder && !it.needsResolve }
             ?: episode.extractors?.firstOrNull { !it.isPlaceholder } ?: return
@@ -1393,7 +1393,7 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         if (httpServerFor != null && httpServerFor !== ext) stopHttpServer()
         val needResolve = ext.needsResolve
         val stale = staleCheckDoneFor !== ext && !ext.server.offline &&
-            ext.resolvedAtMs > 0 && System.currentTimeMillis() - ext.resolvedAtMs > LINK_MAX_AGE_MS
+            ext.resolvedAtMs > 0 && java.lang.System.currentTimeMillis() - ext.resolvedAtMs > LINK_MAX_AGE_MS
         val needServer = ext is ani.dantotsu.parsers.VideoServerPassthrough &&
             httpServer == null && httpServerFailedFor !== ext && ext.usesHttpServer()
         if (!needResolve && !stale && !needServer) return false

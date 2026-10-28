@@ -154,7 +154,11 @@ object MangaImageFetcher {
                 return decodeDataUri(imageUrl)
                     ?: throw PageLoadException(FailureKind.NO_DATA, "bad data: uri")
             }
-            val bytes = source.getImage(page).use { it.body.bytes() }
+            val bytes = source.getImage(page).use {
+                // extensions may override getImage without awaitSuccess(): never cache an error page
+                if (!it.isSuccessful) throw HttpException(it.code)
+                it.body.bytes()
+            }
             if (bytes.isEmpty()) throw PageLoadException(FailureKind.NO_DATA, "empty image body")
             return bytes
         } catch (e: CancellationException) {

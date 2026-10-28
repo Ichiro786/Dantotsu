@@ -848,6 +848,9 @@ class MediaDetailsViewModel : ViewModel() {
     ) {
         val link = ep.link ?: return
         if (!ep.allStreams || ep.extractors.isNullOrEmpty()) {
+            // a preload of a source that doesn't allow preloading must not become the shared
+            // load a real (posting) caller joins and gets nothing from
+            if (!post && watchSources?.get(i)?.allowsPreloading == false) return
             val key = "all|$i|$link"
             val joining = videoLoadJobs[key]?.isCompleted == false
             if (joining) {
