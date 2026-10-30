@@ -144,6 +144,17 @@ class MainActivity : AppCompatActivity() {
             bottomNavBar.background = backgroundDrawable
         }
         bottomNavBar.background = ContextCompat.getDrawable(this, R.drawable.bottom_nav_gray)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Frosted pill: blur of the pages scrolling behind it, tinted with the theme surface.
+            ani.dantotsu.widgets.BackdropBlurDrawable.attach(
+                bar = bottomNavBar,
+                source = binding.backdropSource,
+                surfaceColor = getThemeColor(com.google.android.material.R.attr.colorSurfaceContainer),
+                solidColor = ContextCompat.getColor(this, R.color.grey_nav),
+                isDark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                    Configuration.UI_MODE_NIGHT_YES,
+            )
+        }
 
         val offset = try {
             val statusBarHeightId = resources.getIdentifier("status_bar_height", "dimen", "android")

@@ -13,10 +13,17 @@
         android:layout_height="wrap_content"
         android:layout_gravity="center" />
 
-    <androidx.viewpager2.widget.ViewPager2
-        android:id="@+id/viewpager"
+    <!-- Content behind the floating nav pill; recorded once per frame for its backdrop blur. -->
+    <ani.dantotsu.widgets.BackdropSourceLayout
+        android:id="@+id/backdropSource"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent">
+
+        <androidx.viewpager2.widget.ViewPager2
+            android:id="@+id/viewpager"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+    </ani.dantotsu.widgets.BackdropSourceLayout>
 
     <include
         android:id="@+id/included_navbar"
