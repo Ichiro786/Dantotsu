@@ -38,14 +38,14 @@
                     tools:ignore="ContentDescription,ImageContrastCheck"
                     tools:src="@tools:sample/backgrounds/scenic[0]" />
 
-                <ProgressBar
+                <com.google.android.material.loadingindicator.LoadingIndicator
                     android:id="@+id/imgProgProgress2"
-                    style="?android:attr/progressBarStyle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="center"
                     android:layout_margin="64dp"
-                    android:visibility="visible" />
+                    android:visibility="visible"
+                    style="@style/Widget.Material3.LoadingIndicator.Contained" />
 
             </FrameLayout>
 
@@ -67,14 +67,14 @@
                     tools:ignore="ContentDescription,ImageContrastCheck"
                     tools:src="@tools:sample/backgrounds/scenic[0]" />
 
-                <ProgressBar
+                <com.google.android.material.loadingindicator.LoadingIndicator
                     android:id="@+id/imgProgProgress1"
-                    style="?android:attr/progressBarStyle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="center"
                     android:layout_margin="64dp"
-                    android:visibility="visible" />
+                    android:visibility="visible"
+                    style="@style/Widget.Material3.LoadingIndicator.Contained" />
 
             </FrameLayout>
 

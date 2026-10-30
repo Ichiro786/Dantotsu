@@ -78,11 +78,13 @@
             android:visibility="gone"
             tools:visibility="visible">
 
-            <ProgressBar
+            <com.google.android.material.loadingindicator.LoadingIndicator
                 android:layout_width="20dp"
                 android:layout_height="20dp"
-                android:indeterminate="true"
-                android:indeterminateTint="#B3FFFFFF" />
+                app:containerWidth="20dp"
+                app:containerHeight="20dp"
+                app:indicatorSize="14dp"
+                app:indicatorColor="#B3FFFFFF" />
 
             <TextView
                 android:id="@+id/transitionLoadingText"

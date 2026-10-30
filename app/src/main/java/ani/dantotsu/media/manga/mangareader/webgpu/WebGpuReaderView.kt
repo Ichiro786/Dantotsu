@@ -4,7 +4,11 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.view.Choreographer
+import android.view.LayoutInflater
 import android.view.View
+import android.widget.FrameLayout
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -18,6 +22,7 @@ import ani.dantotsu.media.manga.mangareader.MangaReaderActivity
 import ani.dantotsu.parsers.MangaImage
 import ani.dantotsu.snackString
 import ani.dantotsu.util.Logger
+import com.google.android.material.loadingindicator.LoadingIndicator
 import ca.mpreg.imagedecoder.ImageDecoder
 import ca.mpreg.webgpuviewer.ImageView
 import ca.mpreg.webgpuviewer.ImageViewContinuous
@@ -166,6 +171,39 @@ class WebGpuReaderView(
     @Volatile
     private var lastReadThrough: ImagePage? = null
 
+    /**
+     * Material 3 Expressive LoadingIndicators over the pages that are still loading. The viewer
+     * draws on a GPU surface, so a real (animated, shape-morphing) View sits above it: centred
+     * on the current page in paged mode, and on each loading page's visible part in continuous
+     * mode (positions from the viewer's own page placement, refreshed every frame while a loading
+     * page is on screen or the strip scrolls). Add it above [viewer]; it never takes touches.
+     */
+    val loadingOverlay: FrameLayout = FrameLayout(activity).apply {
+        isClickable = false
+        isFocusable = false
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    }
+
+    private val indicators = ArrayList<LoadingIndicator>(3)
+
+    /** False once placing the overlay failed: the GPU placeholder draws its dot again. */
+    @Volatile
+    private var overlayAvailable = true
+
+    @Volatile
+    private var overlaySyncPosted = false
+
+    private val overlayFrame = Choreographer.FrameCallback { syncLoadingOverlay() }
+
+    private val overlaySyncRunnable = Runnable {
+        overlaySyncPosted = false
+        Choreographer.getInstance().removeFrameCallback(overlayFrame)
+        Choreographer.getInstance().postFrameCallback(overlayFrame)
+    }
+
+    /** Last self-heal per page key (uptime ms), see [syncLoadingOverlay]. */
+    private val lastHeal = HashMap<Int, Long>()
+
     /** Page index (0-based) within the current chapter; a transition counts as its chapter's edge. */
     val currentPosition: Int
         get() = when (val slot = slots[currentKey]) {
@@ -217,7 +255,13 @@ class WebGpuReaderView(
             val cx = dst.width * (0.5f + scale * x)
             val cy = dst.height * (0.5f + scale * y)
             val full = min(min(width, height), viewerWidth) * 0.25f * scale
-            circle(cx, cy, full / 2f, if (failed) 0x88CC4444.toInt() else 0x55888888.toInt())
+            // Loading is shown by the LoadingIndicator overlay; the dot is only the failed state
+            // (or the fallback when the overlay can't place itself).
+            if (failed) {
+                circle(cx, cy, full / 2f, 0x88CC4444.toInt())
+            } else if (!overlayAvailable) {
+                circle(cx, cy, full / 2f, 0x55888888.toInt())
+            }
         }
     }
 
@@ -317,6 +361,7 @@ class WebGpuReaderView(
                 // page read through (Mihon's rule - scrolling up to peek at the page above doesn't
                 // walk progress back). Called every frame while scrolling, so only a change posts.
                 onViewport = { readThrough ->
+                    requestOverlaySync()
                     if (readThrough !== lastReadThrough) {
                         lastReadThrough = readThrough
                         val key = readThrough?.let { keyOf(it) } ?: currentKey
@@ -343,6 +388,7 @@ class WebGpuReaderView(
                             preloadAround(target)
                         }
                     }
+                    requestOverlaySync()
                 }
             }
         }
@@ -733,6 +779,118 @@ class WebGpuReaderView(
         ready.forEach { it.cleanup() }
     }
 
+    // ---- loading indicator overlay ------------------------------------------------------------
+
+    /** Any thread: re-place the indicators on the next frame. */
+    private fun requestOverlaySync() {
+        if (destroyed || overlaySyncPosted) return
+        overlaySyncPosted = true
+        mainHandler.post(overlaySyncRunnable)
+    }
+
+    private fun indicator(i: Int): LoadingIndicator {
+        while (indicators.size <= i) {
+            val v = LayoutInflater.from(activity)
+                .inflate(R.layout.item_reader_loading_indicator, loadingOverlay, false) as LoadingIndicator
+            v.visibility = View.GONE
+            loadingOverlay.addView(v)
+            indicators += v
+        }
+        return indicators[i]
+    }
+
+    /** Main thread. */
+    private fun syncLoadingOverlay() {
+        if (destroyed) return
+        val w = loadingOverlay.width
+        val h = loadingOverlay.height
+        val targets = ArrayList<Long>(3) // packed (x, y) centres
+        val loadingKeys = ArrayList<Int>(3)
+        if (w > 0 && h > 0 && overlayAvailable) {
+            if (!isContinuous) {
+                val page = pageCache[currentKey]
+                if (page is ProgressPage && !page.failed) {
+                    targets += pack(w / 2f, h / 2f)
+                    loadingKeys += currentKey
+                }
+            } else {
+                val state = continuousViewer?.state
+                if (state != null) {
+                    val size = indicatorSizePx()
+                    val from = currentKey - 1
+                    val to = currentKey + max(2, pagesBelow + 1)
+                    for (k in from..to) {
+                        val page = pageCache[k] as? ProgressPage ?: continue
+                        if (page.failed) continue
+                        val place = try {
+                            WebGpuPlacement.place(state, page)
+                        } catch (e: Throwable) {
+                            // Library changed under us: fall back to the GPU dot.
+                            Logger.log("WebGpuReaderView: page placement unavailable: $e")
+                            overlayAvailable = false
+                            invalidate()
+                            null
+                        } ?: continue
+                        val pageW = page.width * place[2]
+                        val top = place[1]
+                        val bottom = top + page.height * place[2]
+                        val visTop = max(0f, top)
+                        val visBottom = min(h.toFloat(), bottom)
+                        if (visBottom - visTop < size) continue
+                        val cx = (place[0] + pageW / 2f).coerceIn(size / 2f, w - size / 2f)
+                        targets += pack(cx, (visTop + visBottom) / 2f)
+                        loadingKeys += k
+                        if (targets.size == 3) break
+                    }
+                }
+            }
+        }
+        for (i in 0 until max(targets.size, indicators.size)) {
+            if (i < targets.size) {
+                val v = indicator(i)
+                val cx = Float.fromBits((targets[i] ushr 32).toInt())
+                val cy = Float.fromBits(targets[i].toInt())
+                val vw = if (v.width > 0) v.width else indicatorSizePx().toInt()
+                val vh = if (v.height > 0) v.height else indicatorSizePx().toInt()
+                v.translationX = cx - vw / 2f
+                v.translationY = cy - vh / 2f
+                if (v.visibility != View.VISIBLE) v.visibility = View.VISIBLE
+            } else if (indicators[i].visibility != View.GONE) {
+                indicators[i].visibility = View.GONE
+            }
+        }
+        healStalledLoads(loadingKeys)
+        // Follow the strip while a loading page is on screen (scrolling also re-posts via
+        // onViewport); a paged indicator is static.
+        if (isContinuous && targets.isNotEmpty()) {
+            Choreographer.getInstance().postFrameCallback(overlayFrame)
+        }
+    }
+
+    /**
+     * A page on screen that shows "loading" but has no load running or queued (cancelled while
+     * it was off the window, or its retry was dropped) is asked for again, at most every 2 s, so
+     * a placeholder can't sit there forever.
+     */
+    private fun healStalledLoads(keys: List<Int>) {
+        if (keys.isEmpty()) return
+        val now = SystemClock.uptimeMillis()
+        for (k in keys) {
+            if (loadingJobs.containsKey(k) || pendingLoads.contains(k) || failedPages.contains(k)) continue
+            val last = lastHeal[k] ?: 0L
+            if (now - last < 2_000L) continue
+            lastHeal[k] = now
+            Logger.log("WebGpuReaderView: page key $k was loading with no job, requesting it again")
+            requestLoad(k)
+        }
+        if (lastHeal.size > 64) lastHeal.keys.retainAll(keys.toSet())
+    }
+
+    private fun indicatorSizePx(): Float = activity.resources.displayMetrics.density * 48f
+
+    private fun pack(x: Float, y: Float): Long =
+        (x.toRawBits().toLong() shl 32) or (y.toRawBits().toLong() and 0xFFFFFFFFL)
+
     // ---- loading -----------------------------------------------------------------------------
 
     /** Main thread. Fetch (IO, error-aware retries) then decode (single decode thread), then install. */
@@ -903,6 +1061,7 @@ class WebGpuReaderView(
     }
 
     fun invalidate() {
+        requestOverlaySync()
         if (isContinuous) {
             continuousViewer?.state?.invalidate()
         } else {
@@ -925,6 +1084,8 @@ class WebGpuReaderView(
     fun destroy() {
         destroyed = true
         mainHandler.removeCallbacksAndMessages(null)
+        Choreographer.getInstance().removeFrameCallback(overlayFrame)
+        indicators.forEach { it.visibility = View.GONE }
         if (isContinuous) {
             continuousViewer?.state?.onViewport = null
             continuousViewer?.state?.onPageChange = null

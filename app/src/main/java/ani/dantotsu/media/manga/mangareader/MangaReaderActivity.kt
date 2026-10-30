@@ -934,6 +934,14 @@ class MangaReaderActivity : AppCompatActivity() {
                         android.widget.FrameLayout.LayoutParams.MATCH_PARENT
                     )
                 )
+                // M3E loading indicators drawn over pages that are still loading.
+                binding.mangaReaderWebGpuContainer.addView(
+                    newGpu.loadingOverlay,
+                    android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
                 webGpuReaderView = newGpu
             }
             binding.mangaReaderSwipy.child = webGpuReaderView?.viewer

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Reader page placeholder (WebGPU overlay): M3 Expressive contained loading indicator. -->
+<com.google.android.material.loadingindicator.LoadingIndicator xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/Widget.Material3.LoadingIndicator.Contained"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:clickable="false"
+    android:focusable="false" />
