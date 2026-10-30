@@ -183,7 +183,7 @@
                 android:textColor="?attr/colorOnBackground"
                 android:textSize="18sp" />
 
-            <ProgressBar
+            <com.google.android.material.loadingindicator.LoadingIndicator
                 android:id="@+id/commentsProgressBar"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

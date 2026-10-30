@@ -9,4 +9,7 @@
         <item name="android:background">?android:attr/colorBackground</item>
         <item name="android:textColor">?android:attr/textColorPrimary</item>
     </style>
+
+    <!-- Material 3 Expressive controls (MDC 1.14) -->
+    <style name="Widget.Dantotsu.LoadingIndicator" parent="Widget.Material3.LoadingIndicator" />
 </resources>

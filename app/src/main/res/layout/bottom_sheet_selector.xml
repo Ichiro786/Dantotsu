@@ -28,8 +28,7 @@
             android:textAllCaps="true"
             android:textSize="20sp" />
 
-        <ProgressBar
-            style="?android:attr/progressBarStyle"
+        <com.google.android.material.loadingindicator.LoadingIndicator
             android:layout_width="match_parent"
             android:layout_height="50dp"
             android:layout_gravity="center"
@@ -98,9 +97,8 @@
             tools:itemCount="4"
             tools:listitem="@layout/item_stream" />
 
-        <ProgressBar
+        <com.google.android.material.loadingindicator.LoadingIndicator
             android:id="@+id/selectorProgressBar"
-            style="?android:attr/progressBarStyle"
             android:layout_width="match_parent"
             android:layout_height="50dp"
             android:layout_margin="10dp" />

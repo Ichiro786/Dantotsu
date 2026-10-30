@@ -222,9 +222,8 @@
             android:layout_height="wrap_content"
             android:minHeight="250dp">
 
-            <ProgressBar
+            <com.google.android.material.loadingindicator.LoadingIndicator
                 android:id="@+id/animeUpdatedProgressBar"
-                style="?android:attr/progressBarStyle"
                 android:layout_width="wrap_content"
                 android:layout_height="48dp"
                 android:layout_gravity="center" />
@@ -284,9 +283,8 @@
         android:layout_height="wrap_content"
         android:minHeight="250dp">
 
-        <ProgressBar
+        <com.google.android.material.loadingindicator.LoadingIndicator
             android:id="@+id/animeMoviesProgressBar"
-            style="?android:attr/progressBarStyle"
             android:layout_width="wrap_content"
             android:layout_height="48dp"
             android:layout_gravity="center" />
@@ -345,9 +343,8 @@
         android:layout_height="wrap_content"
         android:minHeight="250dp">
 
-        <ProgressBar
+        <com.google.android.material.loadingindicator.LoadingIndicator
             android:id="@+id/animeTopRatedProgressBar"
-            style="?android:attr/progressBarStyle"
             android:layout_width="wrap_content"
             android:layout_height="48dp"
             android:layout_gravity="center" />
@@ -405,9 +402,8 @@
         android:layout_height="wrap_content"
         android:minHeight="250dp">
 
-        <ProgressBar
+        <com.google.android.material.loadingindicator.LoadingIndicator
             android:id="@+id/animeMostFavProgressBar"
-            style="?android:attr/progressBarStyle"
             android:layout_width="wrap_content"
             android:layout_height="48dp"
             android:layout_gravity="center" />

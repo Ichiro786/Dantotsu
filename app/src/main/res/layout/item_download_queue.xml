@@ -100,13 +100,14 @@
 
                 <com.google.android.material.progressindicator.LinearProgressIndicator
                     android:id="@+id/itemDownloadProgressBar"
+                    style="@style/Widget.Material3Expressive.LinearProgressIndicator.Wavy"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    app:trackColor="?attr/colorSurface"
+                    app:trackColor="?attr/colorSurfaceContainerHighest"
                     app:indicatorColor="?attr/colorPrimary"
-                    app:trackCornerRadius="4dp"
-                    app:trackThickness="6dp" />
+                    app:trackThickness="4dp"
+                    app:trackCornerRadius="2dp" />
 
                 <TextView
                     android:id="@+id/itemDownloadProgressText"

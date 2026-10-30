@@ -78,9 +78,8 @@
                     app:tint="?attr/colorOnBackground" />
             </LinearLayout>
 
-            <ProgressBar
+            <com.google.android.material.loadingindicator.LoadingIndicator
                 android:id="@+id/commentsProgressBar"
-                style="?android:attr/progressBarStyle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="bottom|center_horizontal"
@@ -102,9 +101,8 @@
                     tools:listitem="@layout/item_comments"
                     tools:visibility="visible" />
 
-                <ProgressBar
+                <com.google.android.material.loadingindicator.LoadingIndicator
                     android:id="@+id/commentBottomRefresh"
-                    style="?android:attr/progressBarStyle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="bottom|center_horizontal"

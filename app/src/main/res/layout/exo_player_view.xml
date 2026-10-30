@@ -338,17 +338,15 @@
         </LinearLayout>
     </androidx.cardview.widget.CardView>
 
-    <com.google.android.material.progressindicator.CircularProgressIndicator
+    <com.google.android.material.loadingindicator.LoadingIndicator
         android:id="@id/exo_buffering"
         android:layout_width="72dp"
         android:layout_height="72dp"
         android:layout_gravity="center"
-        android:indeterminate="true"
-        android:indeterminateBehavior="repeat"
-        app:indicatorColor="?attr/colorSecondary"
-        app:indicatorSize="56dp"
-        app:trackCornerRadius="4dp"
-        app:trackThickness="4dp" />
+        style="@style/Widget.Material3.LoadingIndicator.Contained"
+        app:containerWidth="72dp"
+        app:containerHeight="72dp"
+        app:indicatorSize="51dp" />
 
     <View
         android:id="@+id/exo_touch_view"

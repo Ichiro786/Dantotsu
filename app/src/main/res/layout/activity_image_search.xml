@@ -53,7 +53,7 @@
         app:icon="@drawable/ic_round_image_search_24"
         app:iconTint="?attr/colorOnPrimary" />
 
-    <ProgressBar
+    <com.google.android.material.loadingindicator.LoadingIndicator
         android:id="@+id/progressBar"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

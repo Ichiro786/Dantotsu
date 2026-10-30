@@ -27,9 +27,8 @@
 
     </com.google.android.material.appbar.AppBarLayout>
 
-    <ProgressBar
+    <com.google.android.material.loadingindicator.LoadingIndicator
         android:id="@+id/studioProgressBar"
-        style="?android:attr/progressBarStyle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_margin="32dp"

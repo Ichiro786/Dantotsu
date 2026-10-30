@@ -213,13 +213,17 @@
                     android:src="@drawable/ic_round_play_arrow_24"
                     app:tint="@android:color/white" />
 
-                <ProgressBar
+                <com.google.android.material.loadingindicator.LoadingIndicator
                     android:id="@+id/exo_cast_buffering"
                     android:layout_width="34dp"
                     android:layout_height="34dp"
                     android:layout_gravity="center"
-                    android:indeterminateTint="?attr/colorPrimary"
-                    android:visibility="gone" />
+                    android:visibility="gone"
+                    style="@style/Widget.Material3.LoadingIndicator.Contained"
+                    app:containerWidth="34dp"
+                    app:containerHeight="34dp"
+                    app:indicatorSize="24dp"
+                    app:indicatorColor="?attr/colorPrimary" />
             </FrameLayout>
 
             <ImageButton

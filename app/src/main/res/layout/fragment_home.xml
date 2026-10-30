@@ -134,9 +134,9 @@
 
                             </LinearLayout>
 
-                            <ProgressBar
+                            <com.google.android.material.progressindicator.LinearProgressIndicator
+                                style="@style/Widget.Material3Expressive.LinearProgressIndicator.Wavy"
                                 android:id="@+id/homeUserDataProgressBar"
-                                style="?android:attr/progressBarStyleHorizontal"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:layout_gravity="center"
@@ -385,9 +385,8 @@
                 android:minHeight="120dp"
                 android:layout_marginVertical="8dp"
                 android:visibility="gone">
-                <ProgressBar
+                <com.google.android.material.loadingindicator.LoadingIndicator
                     android:id="@+id/homeUserStatusProgressBar"
-                    style="?android:attr/progressBarStyle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="center" />
@@ -528,9 +527,8 @@
                             tools:ignore="TextContrastCheck" />
                     </LinearLayout>
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:id="@+id/homeWatchingProgressBar"
-                        style="?android:attr/progressBarStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"
@@ -621,9 +619,8 @@
 
                     </LinearLayout>
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:id="@+id/homeFavAnimeProgressBar"
-                        style="?android:attr/progressBarStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"
@@ -717,9 +714,8 @@
                             tools:ignore="TextContrastCheck" />
                     </LinearLayout>
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:id="@+id/homePlannedAnimeProgressBar"
-                        style="?android:attr/progressBarStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"
@@ -813,9 +809,8 @@
                             tools:ignore="TextContrastCheck" />
                     </LinearLayout>
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:id="@+id/homeReadingProgressBar"
-                        style="?android:attr/progressBarStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"
@@ -905,9 +900,8 @@
 
                     </LinearLayout>
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:id="@+id/homeFavMangaProgressBar"
-                        style="?android:attr/progressBarStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"
@@ -1002,9 +996,8 @@
                             tools:ignore="TextContrastCheck" />
                     </LinearLayout>
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:id="@+id/homePlannedMangaProgressBar"
-                        style="?android:attr/progressBarStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"
@@ -1092,9 +1085,8 @@
                             android:textAlignment="center" />
                     </LinearLayout>
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:id="@+id/homeMissingSequelsProgressBar"
-                        style="?android:attr/progressBarStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"
@@ -1183,9 +1175,8 @@
 
                     </LinearLayout>
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:id="@+id/homeRecommendedProgressBar"
-                        style="?android:attr/progressBarStyle"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_gravity="center"

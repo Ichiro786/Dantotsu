@@ -53,14 +53,16 @@
     </com.google.android.material.textfield.TextInputLayout>
 
     <!-- Loader -->
-    <ProgressBar
+    <com.google.android.material.loadingindicator.LoadingIndicator
         android:id="@+id/gifProgressBar"
-        style="?android:attr/progressBarStyleSmall"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center"
         android:layout_marginTop="8dp"
-        android:visibility="gone" />
+        android:visibility="gone"
+        app:containerWidth="32dp"
+        app:containerHeight="32dp"
+        app:indicatorSize="24dp" />
 
     <!-- GIF List -->
     <androidx.recyclerview.widget.RecyclerView

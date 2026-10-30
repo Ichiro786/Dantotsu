@@ -36,7 +36,7 @@
         android:textSize="14sp"
         tools:text="/ˌsɛr.ənˈdɪp.ɪ.ti/" />
 
-    <ProgressBar
+    <com.google.android.material.loadingindicator.LoadingIndicator
         android:id="@+id/dictProgress"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

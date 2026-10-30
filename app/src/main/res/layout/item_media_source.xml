@@ -382,9 +382,8 @@
             app:singleSelection="true" />
     </HorizontalScrollView>
 
-    <ProgressBar
+    <com.google.android.material.loadingindicator.LoadingIndicator
         android:id="@+id/sourceProgressBar"
-        style="?android:attr/progressBarStyle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginBottom="8dp"

@@ -112,7 +112,7 @@ class MediaDetailsActivity : AppCompatActivity(), AppBarLayout.OnOffsetChangedLi
             ThemeManager(this).applyTheme()
             setContentView(android.widget.FrameLayout(this).apply {
                 addView(
-                    android.widget.ProgressBar(this@MediaDetailsActivity),
+                    com.google.android.material.loadingindicator.LoadingIndicator(this@MediaDetailsActivity),
                     android.widget.FrameLayout.LayoutParams(
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,

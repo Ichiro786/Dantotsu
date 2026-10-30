@@ -64,12 +64,12 @@
                     android:visibility="gone"
                     app:srcCompat="@drawable/ic_round_heart_broken_24" />
 
-                <ProgressBar
+                <com.google.android.material.loadingindicator.LoadingIndicator
                     android:id="@+id/bottomImageProgress"
-                    style="?android:attr/progressBarStyle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_gravity="center" />
+                    android:layout_gravity="center"
+                    style="@style/Widget.Material3.LoadingIndicator.Contained" />
 
             </FrameLayout>
         </androidx.core.widget.NestedScrollView>

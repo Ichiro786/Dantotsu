@@ -450,10 +450,12 @@
                     android:visibility="gone"
                     tools:visibility="visible">
 
-                    <ProgressBar
+                    <com.google.android.material.loadingindicator.LoadingIndicator
                         android:layout_width="24dp"
                         android:layout_height="24dp"
-                        android:indeterminate="true" />
+                        app:containerWidth="24dp"
+                        app:containerHeight="24dp"
+                        app:indicatorSize="17dp" />
 
                     <TextView
                         android:layout_width="wrap_content"

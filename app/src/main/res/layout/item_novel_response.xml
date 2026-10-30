@@ -30,12 +30,13 @@
                 app:cardBackgroundColor="#000000"
                 app:cardCornerRadius="16dp">
 
-                <ProgressBar
-                    style="?android:attr/progressBarStyle"
+                <com.google.android.material.loadingindicator.LoadingIndicator
                     android:layout_width="32dp"
                     android:layout_height="32dp"
                     android:layout_gravity="center"
-                    android:indeterminate="true" />
+                    app:containerWidth="32dp"
+                    app:containerHeight="32dp"
+                    app:indicatorSize="23dp" />
 
                 <ImageView
                     android:id="@+id/itemMediaImage"

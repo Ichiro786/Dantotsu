@@ -79,7 +79,7 @@
             tools:listitem="@layout/item_media_compact"
             tools:orientation="horizontal" />
 
-        <ProgressBar
+        <com.google.android.material.loadingindicator.LoadingIndicator
             android:id="@+id/mediaListProgressBar"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

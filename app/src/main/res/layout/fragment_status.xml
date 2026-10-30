@@ -263,13 +263,15 @@
         </LinearLayout>
     </LinearLayout>
 
-    <ProgressBar
+    <com.google.android.material.loadingindicator.LoadingIndicator
         android:id="@+id/androidStoriesLoadingView"
         android:layout_width="40dp"
         android:layout_height="40dp"
         android:layout_gravity="center"
-        android:indeterminate="true"
         android:visibility="gone"
-        tools:visibility="visible" />
+        tools:visibility="visible"
+        app:containerWidth="40dp"
+        app:containerHeight="40dp"
+        app:indicatorSize="28dp" />
 
 </FrameLayout>
