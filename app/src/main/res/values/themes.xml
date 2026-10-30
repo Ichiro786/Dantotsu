@@ -20,6 +20,7 @@
         </item>
         <item name="snackbarTextViewStyle">@string/MySnackBarText</item>
         <item name="popupMenuStyle">@style/MyPopup</item>
+        <item name="sliderStyle">@style/Widget.Dantotsu.Slider</item>
         <item name="loadingIndicatorStyle">@style/Widget.Dantotsu.LoadingIndicator</item>
         <item name="swipeRefreshLayoutProgressSpinnerBackgroundColor">?attr/colorSurfaceContainerHigh</item>
         <item name="android:windowSplashScreenAnimationDuration" tools:targetApi="s">1000</item>

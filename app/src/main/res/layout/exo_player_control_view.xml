@@ -505,9 +505,12 @@
                 android:layout_width="match_parent"
                 android:layout_height="24dp"
                 app:ad_marker_color="#A9FFFFFF"
-                app:bar_height="2dp"
+                app:bar_height="4dp"
+                app:buffered_color="#66FFFFFF"
                 app:played_color="?attr/colorPrimary"
                 app:scrubber_color="?attr/colorPrimary"
+                app:scrubber_drawable="@drawable/m3e_timebar_handle"
+                app:unplayed_color="#33FFFFFF"
                 tools:ignore="SpeakableTextPresentCheck" />
 
         </LinearLayout>

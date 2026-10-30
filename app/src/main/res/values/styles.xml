@@ -11,5 +11,12 @@
     </style>
 
     <!-- Material 3 Expressive controls (MDC 1.14) -->
+    <style name="Widget.Dantotsu.Slider" parent="Widget.Material3.Slider" />
+
+    <!-- Player brightness / volume (rotated 270): expressive small track with a bar handle. -->
+    <style name="Widget.Dantotsu.Slider.PlayerVertical" parent="Widget.Material3Expressive.Slider.Small">
+        <item name="labelBehavior">gone</item>
+    </style>
+
     <style name="Widget.Dantotsu.LoadingIndicator" parent="Widget.Material3.LoadingIndicator" />
 </resources>

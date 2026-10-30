@@ -273,11 +273,8 @@
                     android:valueTo="1"
                     app:labelBehavior="floating"
                     app:labelStyle="@style/fontTooltip"
-                    app:thumbRadius="8dp"
-                    app:tickColor="#0000"
                     app:trackColorActive="?attr/colorPrimary"
-                    app:trackColorInactive="@color/grey_60"
-                    app:trackHeight="2dp" />
+                    app:tickVisibilityMode="hidden" />
 
             </LinearLayout>
 

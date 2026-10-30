@@ -272,17 +272,14 @@
                 android:layout_gravity="center"
                 android:layout_marginTop="76dp"
                 android:layout_marginBottom="-20dp"
-                style="@style/Widget.Material3.Slider.Legacy"
+                style="@style/Widget.Dantotsu.Slider.PlayerVertical"
                 android:rotation="270"
                 android:value="2"
                 android:valueFrom="0"
                 android:valueTo="10"
                 app:labelBehavior="gone"
-                app:thumbElevation="0dp"
-                app:thumbRadius="12dp"
                 app:trackColorActive="?attr/colorPrimary"
-                app:trackColorInactive="?attr/colorOnPrimary"
-                app:trackHeight="24dp" />
+                app:trackColorInactive="?attr/colorOnPrimary" />
 
             <ImageView
                 android:layout_width="match_parent"
@@ -317,17 +314,14 @@
                 android:layout_gravity="center"
                 android:layout_marginTop="76dp"
                 android:layout_marginBottom="-20dp"
-                style="@style/Widget.Material3.Slider.Legacy"
+                style="@style/Widget.Dantotsu.Slider.PlayerVertical"
                 android:rotation="270"
                 android:value="2"
                 android:valueFrom="0"
                 android:valueTo="10"
                 app:labelBehavior="gone"
-                app:thumbElevation="0dp"
-                app:thumbRadius="12dp"
                 app:trackColorActive="?attr/colorPrimary"
-                app:trackColorInactive="?attr/colorOnPrimary"
-                app:trackHeight="24dp" />
+                app:trackColorInactive="?attr/colorOnPrimary" />
 
             <ImageView
                 android:layout_width="match_parent"
