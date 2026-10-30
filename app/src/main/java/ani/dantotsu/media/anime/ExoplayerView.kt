@@ -1074,7 +1074,11 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
         val isLocalDash = StreamTypeDetector.isLocalDash(uri)
         val isLocalhostHls = StreamTypeDetector.isLocalhostHls(uri)
 
-        val mimeType = video?.mimeTypeHint ?: when {
+        // The extension's container hint (force_mpegts -> video/mp2t) describes the
+        // *segments*. It must never replace a manifest type: an HLS url played as a
+        // progressive TS file fails with ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
+        // (Anikoto/MegaPlay marks every video force_mpegts).
+        val detectedMimeType = when {
             video?.format == VideoType.M3U8 ||
                     videoUrl.contains(".m3u8", ignoreCase = true) ||
                     videoUrl.contains("/m3u8", ignoreCase = true) ||
@@ -1102,6 +1106,11 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
                 }
             }
             else -> null
+        }
+        val mimeType = when (detectedMimeType) {
+            androidx.media3.common.MimeTypes.APPLICATION_M3U8,
+            androidx.media3.common.MimeTypes.APPLICATION_MPD -> detectedMimeType
+            else -> video?.mimeTypeHint ?: detectedMimeType
         }
 
         var offlineAudioUri: Uri? = null
@@ -1800,7 +1809,15 @@ class ExoplayerView : AppCompatActivity(), Player.Listener {
                 if (playerErrorRetryCount < MAX_PLAYER_ERROR_RETRIES) {
                     playerErrorRetryCount++
                     val savedPos = if (playerManager.isInitialized) player?.currentPosition?.takeIf { it > 0 } ?: playbackPosition else playbackPosition
-                    if (error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED && video != null && video!!.format == VideoType.CONTAINER && extractor != null) {
+                    val playedAsHls = playerManager.currentMediaItem?.localConfiguration?.mimeType ==
+                        androidx.media3.common.MimeTypes.APPLICATION_M3U8
+                    // Retry as HLS when the item was not played as HLS: a CONTAINER that is
+                    // really a playlist, or an M3U8 a container hint pushed onto the
+                    // progressive path.
+                    if (error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED && video != null &&
+                        !playedAsHls && (video!!.format == VideoType.CONTAINER || video!!.format == VideoType.M3U8) &&
+                        extractor != null && extractor?.server?.offline != true
+                    ) {
                         video = video!!.copy(format = VideoType.M3U8)
                         val ext = extractor!!
                         val subConfigs = subtitleManager.buildSubtitleConfigurations(

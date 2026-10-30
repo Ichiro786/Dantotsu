@@ -300,11 +300,17 @@ class DantotsuPlayerManager(
         val isManifestStream = video.format == VideoType.M3U8 || video.format == VideoType.DASH ||
             mimeType == androidx.media3.common.MimeTypes.APPLICATION_M3U8 ||
             mimeType == androidx.media3.common.MimeTypes.APPLICATION_MPD
-        val cacheFactory: DataSource.Factory = PlaylistBypassDataSourceFactory(
+        val playlistAwareFactory: DataSource.Factory = PlaylistBypassDataSourceFactory(
             cached = segmentCacheFactory,
             direct = upstream,
             manifestUrl = video.file.url.takeIf { isManifestStream },
         )
+        // HLS segments behind a fake image header (see DisguisedSegmentDataSourceFactory).
+        val cacheFactory: DataSource.Factory = if (isManifestStream) {
+            DisguisedSegmentDataSourceFactory(playlistAwareFactory)
+        } else {
+            playlistAwareFactory
+        }
 
         val extractorsFactory = subtitleManager.createExtractorsFactory()
         val assParserFactory = subtitleManager.createSubtitleParserFactory()
