@@ -144,8 +144,10 @@ class MainActivity : AppCompatActivity() {
             bottomNavBar.background = backgroundDrawable
         }
         bottomNavBar.background = ContextCompat.getDrawable(this, R.drawable.bottom_nav_gray)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Frosted pill: blur of the pages scrolling behind it, tinted with the theme surface.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            PrefManager.getVal<Boolean>(PrefName.FrostedNavBar)
+        ) {
+            // Frosted pill (Settings > Theme > Frosted navigation bar; off keeps the solid pill): blur of the pages scrolling behind it, tinted with the theme surface.
             ani.dantotsu.widgets.BackdropBlurDrawable.attach(
                 bar = bottomNavBar,
                 source = binding.backdropSource,

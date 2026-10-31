@@ -52,6 +52,17 @@ object SettingsRegistry {
         if (Build.VERSION.SDK_INT > Build.VERSION_CODES.R) {
             list.add(
                 SearchableSetting(
+                    title = context.getString(R.string.frosted_nav_bar),
+                    desc = context.getString(R.string.frosted_nav_bar_desc),
+                    icon = R.drawable.blur_on,
+                    category = context.getString(R.string.theme),
+                    breadcrumbs = "${context.getString(R.string.settings)} > ${context.getString(R.string.theme)}",
+                    targetActivity = SettingsThemeActivity::class.java,
+                    highlightKey = context.getString(R.string.frosted_nav_bar)
+                )
+            )
+            list.add(
+                SearchableSetting(
                     title = context.getString(R.string.use_material_you),
                     desc = context.getString(R.string.use_material_you_desc),
                     icon = R.drawable.ic_round_new_releases_24,

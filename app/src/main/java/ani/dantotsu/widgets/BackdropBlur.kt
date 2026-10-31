@@ -1,7 +1,12 @@
 package ani.dantotsu.widgets
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.ColorFilter
 import android.graphics.Outline
 import android.graphics.Paint
@@ -19,6 +24,7 @@ import android.widget.FrameLayout
 import androidx.annotation.RequiresApi
 import androidx.core.graphics.ColorUtils
 import kotlin.math.min
+import kotlin.random.Random
 
 /**
  * Frosted "Pixel style" backdrop blur for a floating bar, without copying pixels.
@@ -85,16 +91,35 @@ class BackdropBlurDrawable private constructor(
     private val source: BackdropSourceLayout,
     private val baseColor: Int,
     tintColor: Int,
+    strokeColor: Int,
+    private val strokeWidthPx: Float,
     private val cornerRadiusPx: Float,
     blurRadiusPx: Float,
+    isDark: Boolean,
 ) : Drawable() {
 
     private val blurNode = RenderNode("BackdropBlur").apply {
-        setRenderEffect(RenderEffect.createBlurEffect(blurRadiusPx, blurRadiusPx, Shader.TileMode.CLAMP))
+        // Blur first, then boost saturation (and nudge brightness toward the surface) so cover
+        // colours glow through the glass instead of turning into grey mush.
+        val blur = RenderEffect.createBlurEffect(blurRadiusPx, blurRadiusPx, Shader.TileMode.CLAMP)
+        val vibrancy = RenderEffect.createColorFilterEffect(ColorMatrixColorFilter(vibrancyMatrix(isDark)))
+        setRenderEffect(RenderEffect.createChainEffect(vibrancy, blur))
     }
+    private val tintAlpha = Color.alpha(tintColor)
+    private val strokeAlpha = Color.alpha(strokeColor)
     private val tintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = tintColor }
     private val basePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = baseColor }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = strokeWidthPx
+        color = strokeColor
+    }
+    private val grainPaint = Paint().apply {
+        shader = BitmapShader(grainTile(isDark), Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+    }
+    private var drawableAlpha = 255
     private val rect = RectF()
+    private val strokeRect = RectF()
     private val path = Path()
     private val hostLoc = IntArray(2)
     private val sourceLoc = IntArray(2)
@@ -136,7 +161,17 @@ class BackdropBlurDrawable private constructor(
         canvas.translate(b.left.toFloat(), b.top.toFloat())
         canvas.drawRenderNode(blurNode)
         canvas.restoreToCount(save)
+        tintPaint.alpha = tintAlpha * drawableAlpha / 255
         canvas.drawRoundRect(rect, r, r, tintPaint)
+        // Faint grain (tiny tiled bitmap, one draw) breaks up banding in the smooth blur.
+        grainPaint.alpha = drawableAlpha
+        canvas.drawRoundRect(rect, r, r, grainPaint)
+        // 1dp hairline just inside the outline: the glass edge.
+        val inset = strokeWidthPx / 2f
+        strokeRect.set(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset)
+        val sr = (r - inset).coerceAtLeast(0f)
+        strokePaint.alpha = strokeAlpha * drawableAlpha / 255
+        canvas.drawRoundRect(strokeRect, sr, sr, strokePaint)
     }
 
     override fun getOutline(outline: Outline) {
@@ -145,9 +180,12 @@ class BackdropBlurDrawable private constructor(
     }
 
     override fun setAlpha(alpha: Int) {
-        tintPaint.alpha = alpha
+        // Scales the glass layers; never replaces the tint's own translucency.
+        drawableAlpha = alpha.coerceIn(0, 255)
         invalidateSelf()
     }
+
+    override fun getAlpha(): Int = drawableAlpha
 
     override fun setColorFilter(colorFilter: ColorFilter?) {
         tintPaint.colorFilter = colorFilter
@@ -158,11 +196,46 @@ class BackdropBlurDrawable private constructor(
     override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 
     companion object {
+        private const val SATURATION = 1.7f
+        private const val GRAIN_SIZE = 64
+        private var grainDark: Bitmap? = null
+        private var grainLight: Bitmap? = null
+
+        /** Saturation boost, then a gentle pull toward dark/light so labels stay readable. */
+        private fun vibrancyMatrix(isDark: Boolean): ColorMatrix {
+            val m = ColorMatrix().apply { setSaturation(SATURATION) }
+            val scale = if (isDark) 0.82f else 0.88f
+            val lift = if (isDark) 0f else 255f * 0.12f
+            m.postConcat(
+                ColorMatrix(
+                    floatArrayOf(
+                        scale, 0f, 0f, 0f, lift,
+                        0f, scale, 0f, 0f, lift,
+                        0f, 0f, scale, 0f, lift,
+                        0f, 0f, 0f, 1f, 0f,
+                    )
+                )
+            )
+            return m
+        }
+
+        /** 64x64 random-alpha noise tile, generated once per process (16 KB). */
+        private fun grainTile(isDark: Boolean): Bitmap {
+            (if (isDark) grainDark else grainLight)?.let { return it }
+            val rnd = Random(0x6A1DE041)
+            val rgb = if (isDark) 0xFFFFFF else 0x000000
+            val maxAlpha = if (isDark) 10 else 8
+            val px = IntArray(GRAIN_SIZE * GRAIN_SIZE) { (rnd.nextInt(maxAlpha + 1) shl 24) or rgb }
+            val bmp = Bitmap.createBitmap(px, GRAIN_SIZE, GRAIN_SIZE, Bitmap.Config.ARGB_8888)
+            if (isDark) grainDark = bmp else grainLight = bmp
+            return bmp
+        }
+
         /**
-         * Gives [bar] a blurred backdrop of [source] (API 31+; a no-op below, where the bar keeps
-         * its current background). [surfaceColor] is the theme's surface container colour, so
-         * dynamic/monochrome palettes and light/dark apply; [solidColor] is the old opaque
-         * background, used until the first frame is recorded.
+         * Gives [bar] a frosted, blurred backdrop of [source] (API 31+; a no-op below, where the
+         * bar keeps its current background). [surfaceColor] is the theme's surface container
+         * colour, so dynamic/monochrome palettes and light/dark apply; [solidColor] is the old
+         * opaque background, used until the first frame is recorded.
          */
         fun attach(
             bar: View,
@@ -173,17 +246,22 @@ class BackdropBlurDrawable private constructor(
         ) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
             val density = bar.resources.displayMetrics.density
-            val tint = ColorUtils.setAlphaComponent(surfaceColor, if (isDark) 0xA6 else 0xB8)
+            val tint = ColorUtils.setAlphaComponent(surfaceColor, if (isDark) 0x58 else 0x7A)
+            val stroke = if (isDark) 0x29FFFFFF else 0x14000000
             val drawable = BackdropBlurDrawable(
                 host = bar,
                 source = source,
                 baseColor = solidColor,
                 tintColor = tint,
+                strokeColor = stroke,
+                strokeWidthPx = 1f * density,
                 cornerRadiusPx = 40f * density,
-                blurRadiusPx = 22f * density,
+                blurRadiusPx = 34f * density,
+                isDark = isDark,
             )
             source.recording = true
             if (bar !in source.blurHosts) source.blurHosts += bar
+            bar.backgroundTintList = null
             bar.background = drawable
             source.invalidate()
         }

@@ -143,6 +143,18 @@ class SettingsThemeActivity : AppCompatActivity(), SimpleDialog.OnDialogResultLi
                         ),
                         Settings(
                             type = 2,
+                            name = getString(R.string.frosted_nav_bar),
+                            desc = getString(R.string.frosted_nav_bar_desc),
+                            icon = R.drawable.blur_on,
+                            isChecked = PrefManager.getVal(PrefName.FrostedNavBar),
+                            switch = { isChecked, _ ->
+                                PrefManager.setVal(PrefName.FrostedNavBar, isChecked)
+                                reload()
+                            },
+                            isVisible = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                        ),
+                        Settings(
+                            type = 2,
                             name = getString(R.string.use_material_you),
                             desc = getString(R.string.use_material_you_desc),
                             icon = R.drawable.ic_round_new_releases_24,

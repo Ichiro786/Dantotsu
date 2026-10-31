@@ -95,6 +95,7 @@ enum class PrefName(val data: Pref) {
     AnimeDefaultView(Pref(Location.UI, Int::class, 0)),
     MangaDefaultView(Pref(Location.UI, Int::class, 0)),
     BlurBanners(Pref(Location.UI, Boolean::class, true)),
+    FrostedNavBar(Pref(Location.UI, Boolean::class, true)),
     BlurRadius(Pref(Location.UI, Float::class, 2f)),
     BlurSampling(Pref(Location.UI, Float::class, 2f)),
     ImmersiveMode(Pref(Location.UI, Boolean::class, false)),

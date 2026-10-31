@@ -818,6 +818,8 @@
     <string name="use_custom_theme">Custom theme</string>
     <string name="use_unique_theme_for_each_item">Theme as Anime/Manga </string>
     <string name="oled_theme_variant">OLED theme variant</string>
+    <string name="frosted_nav_bar">Frosted navigation bar</string>
+    <string name="frosted_nav_bar_desc">Blurred, see-through glass behind the home navigation bar (Android 12+). Off uses the solid bar</string>
     <string name="use_system_font">Use device font</string>
     <string name="use_system_font_desc">Use the system font instead of the app\'s default font</string>
     <string name="download_wifi_only">Download on Wi-Fi Only</string>
