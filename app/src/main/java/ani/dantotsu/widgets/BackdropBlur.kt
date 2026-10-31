@@ -63,25 +63,32 @@ class BackdropSourceLayout @JvmOverloads constructor(
         }
     }
 
-    override fun draw(canvas: Canvas) {
+    // Recording MUST happen in dispatchDraw, not draw(): a ViewGroup without a background has
+    // WILL_NOT_DRAW set, so View.updateDisplayListIfDirty takes the PFLAG_SKIP_DRAW fast path and
+    // calls dispatchDraw() directly; an override of draw() is never reached and nothing is ever
+    // recorded (the v1/v2 bug: the pill always fell back to the solid colour).
+    override fun dispatchDraw(canvas: Canvas) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && recording && canvas.isHardwareAccelerated) {
-            drawRecorded(canvas)
+            dispatchDrawRecorded(canvas)
         } else {
-            super.draw(canvas)
+            super.dispatchDraw(canvas)
         }
     }
 
     @RequiresApi(Build.VERSION_CODES.S)
-    private fun drawRecorded(canvas: Canvas) {
+    private fun dispatchDrawRecorded(canvas: Canvas) {
+        val first = contentNode == null
         val node = (contentNode as? RenderNode) ?: RenderNode("BackdropSource").also { contentNode = it }
         node.setPosition(0, 0, width, height)
         val rc = node.beginRecording(width, height)
         try {
-            super.draw(rc)
+            super.dispatchDraw(rc)
         } finally {
             node.endRecording()
         }
         canvas.drawRenderNode(node)
+        // A bar drawn before this first recording showed the solid fallback; redraw it now.
+        if (first) for (i in blurHosts.indices) blurHosts[i].postInvalidateOnAnimation()
     }
 }
 
@@ -118,6 +125,7 @@ class BackdropBlurDrawable private constructor(
         shader = BitmapShader(grainTile(isDark), Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
     }
     private var drawableAlpha = 255
+    private var fallbackDraws = 0
     private val rect = RectF()
     private val strokeRect = RectF()
     private val path = Path()
@@ -135,6 +143,10 @@ class BackdropBlurDrawable private constructor(
         if (!canvas.isHardwareAccelerated || content == null || !content.hasDisplayList()) {
             // Not recorded yet (first frame) or software canvas: the solid bar, as before.
             canvas.drawRoundRect(rect, r, r, basePaint)
+            if (canvas.isHardwareAccelerated && ++fallbackDraws == 30) {
+                // Safety net: the source should have recorded long before this.
+                android.util.Log.w("BackdropBlur", "backdrop source never recorded; blur inactive")
+            }
             return
         }
         // Where the bar sits over the source, translations and animations included.
@@ -246,7 +258,7 @@ class BackdropBlurDrawable private constructor(
         ) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
             val density = bar.resources.displayMetrics.density
-            val tint = ColorUtils.setAlphaComponent(surfaceColor, if (isDark) 0x58 else 0x7A)
+            val tint = ColorUtils.setAlphaComponent(surfaceColor, if (isDark) 0x66 else 0x8C)
             val stroke = if (isDark) 0x29FFFFFF else 0x14000000
             val drawable = BackdropBlurDrawable(
                 host = bar,
